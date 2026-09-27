@@ -1,0 +1,154 @@
+[
+  {"name": "implicit equality on a scalar and on array elements",
+   "filter": {"a": 1},
+   "match": [{"a": 1}, {"a": 1.0}, {"a": {"$numberLong": "1"}}, {"a": [1, 2]}, {"a": [[1], 1]}],
+   "nomatch": [{"a": 2}, {"a": "1"}, {}, {"a": [[1]]}, {"a": null}, {"a": true}]},
+
+  {"name": "null matches null and a missing field",
+   "filter": {"a": null},
+   "match": [{"a": null}, {}, {"b": 1}, {"a": [1, null]}],
+   "nomatch": [{"a": 0}, {"a": false}, {"a": []}, {"a": {"$undefined": true}}, {"a": ""}]},
+
+  {"name": "$eq null is the same as implicit null",
+   "filter": {"a": {"$eq": null}},
+   "match": [{}, {"a": null}],
+   "nomatch": [{"a": 1}, {"a": {"$undefined": true}}]},
+
+  {"name": "null through an array of documents",
+   "filter": {"a.b": null},
+   "match": [{"a": [{"b": 1}, {"c": 2}]}, {"a": {"c": 1}}, {"a": 5}, {}, {"a": [{"b": null}]}],
+   "nomatch": [{"a": [{"b": 1}]}, {"a": {"b": 2}}, {"a": [1, 2]}]},
+
+  {"name": "$ne matches a missing field",
+   "filter": {"a": {"$ne": 1}},
+   "match": [{}, {"a": 2}, {"a": [2, 3]}, {"a": null}, {"a": "1"}],
+   "nomatch": [{"a": 1}, {"a": [1, 2]}, {"a": 1.0}]},
+
+  {"name": "$ne null excludes null and missing",
+   "filter": {"a": {"$ne": null}},
+   "match": [{"a": 0}, {"a": []}, {"a": [1]}],
+   "nomatch": [{}, {"a": null}, {"a": [null, 1]}]},
+
+  {"name": "whole-array equality and arrays nested in arrays",
+   "filter": {"a": [1, 2]},
+   "match": [{"a": [1, 2]}, {"a": [[1, 2], 3]}, {"a": [1.0, 2.0]}],
+   "nomatch": [{"a": [2, 1]}, {"a": [1, 2, 3]}, {"a": 1}, {"a": [1]}]},
+
+  {"name": "$eq with an array operand",
+   "filter": {"a": {"$eq": [1]}},
+   "match": [{"a": [1]}, {"a": [[1], 2]}],
+   "nomatch": [{"a": 1}, {"a": [1, 1]}]},
+
+  {"name": "document equality depends on field order",
+   "filter": {"a": {"x": 1, "y": 2}},
+   "match": [{"a": {"x": 1, "y": 2}}, {"a": [{"x": 1, "y": 2}]}, {"a": {"x": 1.0, "y": 2}}],
+   "nomatch": [{"a": {"y": 2, "x": 1}}, {"a": {"x": 1}}, {"a": {"x": 1, "y": 2, "z": 3}}]},
+
+  {"name": "empty document equality",
+   "filter": {"a": {}},
+   "match": [{"a": {}}, {"a": [{}]}],
+   "nomatch": [{"a": {"b": 1}}, {}]},
+
+  {"name": "DBRef-shaped document is a literal",
+   "filter": {"a": {"$ref": "c", "$id": 1}},
+   "match": [{"a": {"$ref": "c", "$id": 1}}],
+   "nomatch": [{"a": {"$id": 1, "$ref": "c"}}]},
+
+  {"name": "dotted path into documents and arrays of documents",
+   "filter": {"a.b": 5},
+   "match": [{"a": {"b": 5}}, {"a": [{"b": 5}]}, {"a": [{"b": [4, 5]}]}, {"a": {"b": [5]}}, {"a": [{"c": 1}, {"b": 5}]}],
+   "nomatch": [{"a": {"b": 6}}, {"a": 5}, {"a": [[{"b": 5}]]}, {"x": {"a": {"b": 5}}}]},
+
+  {"name": "deep dotted path",
+   "filter": {"a.b.c": "x"},
+   "match": [{"a": {"b": {"c": "x"}}}, {"a": [{"b": [{"c": "y"}, {"c": "x"}]}]}],
+   "nomatch": [{"a": {"b": {"c": "y"}}}, {"a": {"b": "x"}}]},
+
+  {"name": "$in with scalars and null",
+   "filter": {"a": {"$in": [1, "x", null]}},
+   "match": [{"a": 1}, {"a": "x"}, {}, {"a": null}, {"a": [5, "x"]}, {"a": 1.0}],
+   "nomatch": [{"a": 2}, {"a": [2, 3]}, {"a": "X"}]},
+
+  {"name": "$in with a regex element",
+   "filter": {"a": {"$in": [{"$regularExpression": {"pattern": "^ab", "options": ""}}, 5]}},
+   "match": [{"a": "abc"}, {"a": 5}, {"a": ["zz", "abz"]}],
+   "nomatch": [{"a": "xab"}, {}]},
+
+  {"name": "$in with an empty list matches nothing",
+   "filter": {"a": {"$in": []}},
+   "nomatch": [{"a": 1}, {}]},
+
+  {"name": "$in with an array element matches the whole array",
+   "filter": {"a": {"$in": [[1, 2], 7]}},
+   "match": [{"a": [1, 2]}, {"a": 7}],
+   "nomatch": [{"a": 1}, {"a": [2, 1]}]},
+
+  {"name": "$nin matches missing and non-members",
+   "filter": {"a": {"$nin": [1, 2]}},
+   "match": [{}, {"a": 3}, {"a": [3, 4]}, {"a": null}],
+   "nomatch": [{"a": 1}, {"a": [3, 2]}]},
+
+  {"name": "$nin with null excludes missing",
+   "filter": {"a": {"$nin": [null]}},
+   "match": [{"a": 1}],
+   "nomatch": [{}, {"a": null}]},
+
+  {"name": "int64 beyond 2^53 compares exactly",
+   "filter": {"a": {"$numberLong": "9007199254740993"}},
+   "match": [{"a": {"$numberLong": "9007199254740993"}}, {"a": {"$numberDecimal": "9007199254740993"}}],
+   "nomatch": [{"a": 9007199254740992.0}, {"a": {"$numberLong": "9007199254740992"}}]},
+
+  {"name": "NaN equals NaN across numeric types",
+   "filter": {"a": {"$numberDouble": "NaN"}},
+   "match": [{"a": {"$numberDouble": "NaN"}}, {"a": {"$numberDecimal": "NaN"}}],
+   "nomatch": [{"a": 0}, {}]},
+
+  {"name": "negative zero equals zero",
+   "filter": {"a": 0},
+   "match": [{"a": {"$numberDouble": "-0.0"}}, {"a": {"$numberDecimal": "0.00"}}, {"a": {"$numberLong": "0"}}],
+   "nomatch": [{"a": false}, {"a": null}]},
+
+  {"name": "Decimal128 compares exactly against doubles",
+   "filter": {"a": {"$numberDecimal": "0.1"}},
+   "match": [{"a": {"$numberDecimal": "0.10"}}],
+   "nomatch": [{"a": 0.1}]},
+
+  {"name": "Decimal128 equals a double of the same value",
+   "filter": {"a": {"$numberDecimal": "2.50"}},
+   "match": [{"a": 2.5}],
+   "nomatch": [{"a": 2}]},
+
+  {"name": "string equality includes symbols",
+   "filter": {"a": "x"},
+   "match": [{"a": {"$symbol": "x"}}, {"a": "x"}],
+   "nomatch": [{"a": "X"}, {"a": "x "}]},
+
+  {"name": "date equality is not numeric",
+   "filter": {"a": {"$date": "2020-01-01T00:00:00Z"}},
+   "match": [{"a": {"$date": "2020-01-01T00:00:00Z"}}],
+   "nomatch": [{"a": 1577836800000}, {"a": {"$date": "2020-01-01T00:00:00.001Z"}}]},
+
+  {"name": "ObjectId equality",
+   "filter": {"_id": {"$oid": "5f1d7a0b8c9d0e1f2a3b4c5d"}},
+   "match": [{"_id": {"$oid": "5f1d7a0b8c9d0e1f2a3b4c5d"}}],
+   "nomatch": [{"_id": "5f1d7a0b8c9d0e1f2a3b4c5d"}, {"_id": {"$oid": "5f1d7a0b8c9d0e1f2a3b4c5e"}}]},
+
+  {"name": "boolean equality",
+   "filter": {"a": true},
+   "match": [{"a": true}, {"a": [false, true]}],
+   "nomatch": [{"a": 1}, {"a": false}]},
+
+  {"name": "several fields are all required",
+   "filter": {"a": 1, "b": 2},
+   "match": [{"a": 1, "b": 2, "c": 3}],
+   "nomatch": [{"a": 1}, {"b": 2}, {"a": 2, "b": 2}]},
+
+  {"name": "empty filter matches everything",
+   "filter": {},
+   "match": [{}, {"a": 1}]},
+
+  {"name": "$comment is ignored",
+   "filter": {"$comment": "explain me", "a": 1},
+   "match": [{"a": 1}],
+   "nomatch": [{"a": 2}]}
+]

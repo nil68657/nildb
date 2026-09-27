@@ -1,0 +1,185 @@
+[
+  {"name": "$set on an existing field keeps its position",
+   "doc": {"_id": 1, "a": 1, "b": 2}, "update": {"$set": {"a": 5}},
+   "result": {"_id": 1, "a": 5, "b": 2}},
+
+  {"name": "$set appends new fields in lexicographic order",
+   "doc": {"_id": 1, "z": 0}, "update": {"$set": {"c": 1, "b": 2}},
+   "result": {"_id": 1, "z": 0, "b": 2, "c": 1}},
+
+  {"name": "$set orders numeric field names numerically",
+   "doc": {"_id": 1}, "update": {"$set": {"10": 1, "9": 2}},
+   "result": {"_id": 1, "9": 2, "10": 1}},
+
+  {"name": "operators are applied in field order across modifiers",
+   "doc": {"_id": 1}, "update": {"$set": {"z": 1}, "$inc": {"a": 1}},
+   "result": {"_id": 1, "a": 1, "z": 1}},
+
+  {"name": "$set creates nested documents",
+   "doc": {"_id": 1}, "update": {"$set": {"a.b.c": 1}},
+   "result": {"_id": 1, "a": {"b": {"c": 1}}}},
+
+  {"name": "$set into an existing subdocument",
+   "doc": {"_id": 1, "a": {"x": 1}}, "update": {"$set": {"a.y": 2}},
+   "result": {"_id": 1, "a": {"x": 1, "y": 2}}},
+
+  {"name": "$set an array element by index",
+   "doc": {"_id": 1, "a": [1, 2, 3]}, "update": {"$set": {"a.1": 9}},
+   "result": {"_id": 1, "a": [1, 9, 3]}},
+
+  {"name": "$set past the end of an array pads with null",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$set": {"a.3": 4}},
+   "result": {"_id": 1, "a": [1, null, null, 4]}},
+
+  {"name": "$set a field inside an array element",
+   "doc": {"_id": 1, "a": [{"b": 1}, {"b": 2}]}, "update": {"$set": {"a.1.b": 5}},
+   "result": {"_id": 1, "a": [{"b": 1}, {"b": 5}]}},
+
+  {"name": "$set a new document at an array index",
+   "doc": {"_id": 1, "a": []}, "update": {"$set": {"a.1.b": 5}},
+   "result": {"_id": 1, "a": [null, {"b": 5}]}},
+
+  {"name": "$set to the same value is a no-op",
+   "doc": {"_id": 1, "a": 1}, "update": {"$set": {"a": 1}},
+   "result": {"_id": 1, "a": 1}, "modified": false},
+
+  {"name": "$set to an equal value of another type modifies",
+   "doc": {"_id": 1, "a": 1}, "update": {"$set": {"a": 1.0}},
+   "result": {"_id": 1, "a": 1.0}, "modified": true},
+
+  {"name": "$set replaces a whole subdocument",
+   "doc": {"_id": 1, "a": {"x": 1}}, "update": {"$set": {"a": {"y": 2}}},
+   "result": {"_id": 1, "a": {"y": 2}}},
+
+  {"name": "$set through a scalar fails",
+   "doc": {"_id": 1, "a": 5}, "update": {"$set": {"a.b": 1}},
+   "error": "ERR Cannot create field 'b' in element {a: 5}"},
+
+  {"name": "$set through null fails",
+   "doc": {"_id": 1, "a": null}, "update": {"$set": {"a.b": 1}},
+   "error": "ERR Cannot create field 'b' in element {a: null}"},
+
+  {"name": "$set a named field inside an array fails",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$set": {"a.b": 1}},
+   "error": "ERR Cannot create field 'b' in element {a: [1]}"},
+
+  {"name": "$set _id to the same value is allowed",
+   "doc": {"_id": 1, "a": 1}, "update": {"$set": {"_id": 1, "a": 2}},
+   "result": {"_id": 1, "a": 2}},
+
+  {"name": "$set _id to another value fails",
+   "doc": {"_id": 1, "a": 1}, "update": {"$set": {"_id": 2}},
+   "error": "ERR Performing an update on the path '_id' would modify the immutable field '_id'"},
+
+  {"name": "$set _id to an equal double still changes it",
+   "doc": {"_id": 1}, "update": {"$set": {"_id": 1.0}},
+   "error": "ERR Performing an update on the path '_id' would modify the immutable field '_id'"},
+
+  {"name": "$set inside a document _id fails",
+   "doc": {"_id": {"x": 1}}, "update": {"$set": {"_id.y": 2}},
+   "error": "ERR Performing an update on the path '_id' would modify the immutable field '_id'"},
+
+  {"name": "$set a value with a dotted field name fails",
+   "doc": {"_id": 1}, "update": {"$set": {"a": {"b.c": 1}}},
+   "error": "ERR The dotted field 'b.c' in 'b.c' is not valid for storage."},
+
+  {"name": "$unset removes a field",
+   "doc": {"_id": 1, "a": 1, "b": 2}, "update": {"$unset": {"a": ""}},
+   "result": {"_id": 1, "b": 2}},
+
+  {"name": "$unset of missing paths is a no-op",
+   "doc": {"_id": 1}, "update": {"$unset": {"a": 1, "b.c": 1}},
+   "result": {"_id": 1}, "modified": false},
+
+  {"name": "$unset an array element leaves null",
+   "doc": {"_id": 1, "a": [1, 2, 3]}, "update": {"$unset": {"a.1": 1}},
+   "result": {"_id": 1, "a": [1, null, 3]}},
+
+  {"name": "$unset past the end of an array is a no-op",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$unset": {"a.5": 1}},
+   "result": {"_id": 1, "a": [1]}, "modified": false},
+
+  {"name": "$unset a nested field",
+   "doc": {"_id": 1, "a": {"b": 1, "c": 2}}, "update": {"$unset": {"a.b": 1}},
+   "result": {"_id": 1, "a": {"c": 2}}},
+
+  {"name": "$unset through a scalar is a no-op",
+   "doc": {"_id": 1, "a": 5}, "update": {"$unset": {"a.b": 1}},
+   "result": {"_id": 1, "a": 5}, "modified": false},
+
+  {"name": "$unset _id fails",
+   "doc": {"_id": 1, "a": 1}, "update": {"$unset": {"_id": 1}},
+   "error": "ERR Performing an update on the path '_id' would modify the immutable field '_id'"},
+
+  {"name": "an empty operator document is a no-op",
+   "doc": {"_id": 1, "a": 1}, "update": {"$set": {}},
+   "result": {"_id": 1, "a": 1}, "modified": false},
+
+  {"name": "a path and its prefix conflict",
+   "doc": {"_id": 1}, "update": {"$set": {"a": 1}, "$inc": {"a.b": 1}},
+   "error": "ERR Updating the path 'a.b' would create a conflict at 'a'"},
+
+  {"name": "one path under two operators conflicts",
+   "doc": {"_id": 1}, "update": {"$set": {"a": 1}, "$unset": {"a": 1}},
+   "error": "ERR Updating the path 'a' would create a conflict at 'a'"},
+
+  {"name": "a prefix after its extension conflicts",
+   "doc": {"_id": 1}, "update": {"$set": {"a.b": 1, "a": 2}},
+   "error": "ERR Updating the path 'a' would create a conflict at 'a'"},
+
+  {"name": "an empty path component is refused",
+   "doc": {"_id": 1}, "update": {"$set": {"a..b": 1}},
+   "error": "ERR The update path 'a..b' contains an empty field name, which is not allowed."},
+
+  {"name": "positional operators are not in v1",
+   "doc": {"_id": 1}, "update": {"$set": {"a.$": 1}},
+   "error": "ERR positional update operators are not supported in v1"},
+
+  {"name": "all-positional operators are not in v1",
+   "doc": {"_id": 1}, "update": {"$set": {"a.$[].b": 1}},
+   "error": "ERR positional update operators are not supported in v1"},
+
+  {"name": "a dollar-prefixed path component is refused",
+   "doc": {"_id": 1}, "update": {"$set": {"$x": 1}},
+   "error": "ERR The dollar ($) prefixed field '$x' in '$x' is not valid for storage."},
+
+  {"name": "unknown modifier",
+   "doc": {"_id": 1}, "update": {"$foo": {"a": 1}},
+   "error": "ERR Unknown modifier: $foo. Expected a valid update modifier or pipeline-style update specified as an array"},
+
+  {"name": "$bit is not in v1",
+   "doc": {"_id": 1}, "update": {"$bit": {"a": {"and": 1}}},
+   "error": "ERR unsupported update operator '$bit' in v1"},
+
+  {"name": "a modifier needs a document",
+   "doc": {"_id": 1}, "update": {"$set": 5},
+   "error": "ERR Modifiers operate on fields but we found type int instead."},
+
+  {"name": "a plain field among modifiers",
+   "doc": {"_id": 1}, "update": {"$set": {"a": 1}, "b": 2},
+   "error": "ERR Unknown modifier: b."},
+
+  {"name": "$setOnInsert does nothing on an update",
+   "doc": {"_id": 1}, "update": {"$setOnInsert": {"a": 1}},
+   "result": {"_id": 1}, "modified": false},
+
+  {"name": "$currentDate true sets a Date",
+   "doc": {"_id": 1}, "update": {"$currentDate": {"d": true}},
+   "result": {"_id": 1, "d": {"$date": "2026-01-02T03:04:05.678Z"}}},
+
+  {"name": "$currentDate with $type date",
+   "doc": {"_id": 1, "d": 0}, "update": {"$currentDate": {"d": {"$type": "date"}}},
+   "result": {"_id": 1, "d": {"$date": "2026-01-02T03:04:05.678Z"}}},
+
+  {"name": "$currentDate timestamp",
+   "doc": {"_id": 1}, "update": {"$currentDate": {"t": {"$type": "timestamp"}}},
+   "result": {"_id": 1, "t": {"$timestamp": {"t": 1767323045, "i": 1}}}},
+
+  {"name": "$currentDate with an unknown $type",
+   "doc": {"_id": 1}, "update": {"$currentDate": {"d": {"$type": "x"}}},
+   "error": "ERR The '$type' string field is required to be 'date' or 'timestamp'"},
+
+  {"name": "$currentDate with a string",
+   "doc": {"_id": 1}, "update": {"$currentDate": {"d": "now"}},
+   "error": "ERR string is not valid type for $currentDate."}
+]

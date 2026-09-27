@@ -1,0 +1,113 @@
+[
+  {"name": "$inc an int32",
+   "doc": {"_id": 1, "a": 1}, "update": {"$inc": {"a": 2}},
+   "result": {"_id": 1, "a": 3}},
+
+  {"name": "$inc creates a missing field",
+   "doc": {"_id": 1}, "update": {"$inc": {"a": 5}},
+   "result": {"_id": 1, "a": 5}},
+
+  {"name": "$inc a negative amount",
+   "doc": {"_id": 1, "a": 1}, "update": {"$inc": {"a": -3}},
+   "result": {"_id": 1, "a": -2}},
+
+  {"name": "$inc int32 overflow promotes to int64",
+   "doc": {"_id": 1, "a": 2147483647}, "update": {"$inc": {"a": 1}},
+   "result": {"_id": 1, "a": {"$numberLong": "2147483648"}}},
+
+  {"name": "$inc an int with a double gives a double",
+   "doc": {"_id": 1, "a": 1}, "update": {"$inc": {"a": 0.5}},
+   "result": {"_id": 1, "a": 1.5}},
+
+  {"name": "$inc an int64",
+   "doc": {"_id": 1, "a": {"$numberLong": "5"}}, "update": {"$inc": {"a": 1}},
+   "result": {"_id": 1, "a": {"$numberLong": "6"}}},
+
+  {"name": "$inc int64 overflow fails",
+   "doc": {"_id": 1, "a": {"$numberLong": "9223372036854775807"}}, "update": {"$inc": {"a": 1}},
+   "error": "ERR Failed to apply $inc operations to current value"},
+
+  {"name": "$inc by zero is a no-op",
+   "doc": {"_id": 1, "a": 1}, "update": {"$inc": {"a": 0}},
+   "result": {"_id": 1, "a": 1}, "modified": false},
+
+  {"name": "$inc a string fails",
+   "doc": {"_id": 1, "a": "x"}, "update": {"$inc": {"a": 1}},
+   "error": "ERR Cannot apply $inc to a value of non-numeric type. {_id: 1} has the field 'a' of non-numeric type string"},
+
+  {"name": "$inc with a string argument fails",
+   "doc": {"_id": 1}, "update": {"$inc": {"a": "1"}},
+   "error": "ERR Cannot increment with non-numeric argument: {a: \"1\"}"},
+
+  {"name": "$inc with a Decimal128 argument is refused",
+   "doc": {"_id": 1}, "update": {"$inc": {"a": {"$numberDecimal": "1"}}},
+   "error": "ERR Decimal128 is not supported in indexes or arithmetic in v1"},
+
+  {"name": "$inc a Decimal128 field is refused",
+   "doc": {"_id": 1, "a": {"$numberDecimal": "1"}}, "update": {"$inc": {"a": 1}},
+   "error": "ERR Decimal128 is not supported in indexes or arithmetic in v1"},
+
+  {"name": "$inc creates a nested path",
+   "doc": {"_id": 1}, "update": {"$inc": {"a.b": 1}},
+   "result": {"_id": 1, "a": {"b": 1}}},
+
+  {"name": "$inc an array element",
+   "doc": {"_id": 1, "a": [1, 2]}, "update": {"$inc": {"a.0": 10}},
+   "result": {"_id": 1, "a": [11, 2]}},
+
+  {"name": "$mul",
+   "doc": {"_id": 1, "a": 3}, "update": {"$mul": {"a": 4}},
+   "result": {"_id": 1, "a": 12}},
+
+  {"name": "$mul a missing field sets zero of the multiplier's type",
+   "doc": {"_id": 1}, "update": {"$mul": {"a": {"$numberLong": "5"}, "b": 2.5, "c": 3}},
+   "result": {"_id": 1, "a": {"$numberLong": "0"}, "b": 0.0, "c": 0}},
+
+  {"name": "$mul int32 overflow promotes to int64",
+   "doc": {"_id": 1, "a": 65536}, "update": {"$mul": {"a": 65536}},
+   "result": {"_id": 1, "a": {"$numberLong": "4294967296"}}},
+
+  {"name": "$mul int64 overflow fails",
+   "doc": {"_id": 1, "a": {"$numberLong": "4611686018427387904"}}, "update": {"$mul": {"a": 2}},
+   "error": "ERR Failed to apply $mul operations to current value"},
+
+  {"name": "$mul by a double",
+   "doc": {"_id": 1, "a": 2}, "update": {"$mul": {"a": 1.5}},
+   "result": {"_id": 1, "a": 3.0}},
+
+  {"name": "$mul a string argument fails",
+   "doc": {"_id": 1}, "update": {"$mul": {"a": true}},
+   "error": "ERR Cannot multiply with non-numeric argument: {a: true}"},
+
+  {"name": "$min lowers the value",
+   "doc": {"_id": 1, "a": 5}, "update": {"$min": {"a": 3}},
+   "result": {"_id": 1, "a": 3}},
+
+  {"name": "$min with a higher value is a no-op",
+   "doc": {"_id": 1, "a": 5}, "update": {"$min": {"a": 7}},
+   "result": {"_id": 1, "a": 5}, "modified": false},
+
+  {"name": "$min compares across types in BSON order",
+   "doc": {"_id": 1, "a": "x"}, "update": {"$min": {"a": 5}},
+   "result": {"_id": 1, "a": 5}},
+
+  {"name": "$min with null",
+   "doc": {"_id": 1, "a": 1}, "update": {"$min": {"a": null}},
+   "result": {"_id": 1, "a": null}},
+
+  {"name": "$min an equal value of another type is a no-op",
+   "doc": {"_id": 1, "a": 5}, "update": {"$min": {"a": 5.0}},
+   "result": {"_id": 1, "a": 5}, "modified": false},
+
+  {"name": "$max raises the value",
+   "doc": {"_id": 1, "a": 5}, "update": {"$max": {"a": 10}},
+   "result": {"_id": 1, "a": 10}},
+
+  {"name": "$max creates a missing field",
+   "doc": {"_id": 1}, "update": {"$max": {"a": 1}},
+   "result": {"_id": 1, "a": 1}},
+
+  {"name": "$max on dates",
+   "doc": {"_id": 1, "d": {"$date": "2020-01-01T00:00:00Z"}}, "update": {"$max": {"d": {"$date": "2021-01-01T00:00:00Z"}}},
+   "result": {"_id": 1, "d": {"$date": "2021-01-01T00:00:00Z"}}}
+]

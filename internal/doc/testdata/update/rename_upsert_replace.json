@@ -1,0 +1,145 @@
+[
+  {"name": "$rename a field",
+   "doc": {"_id": 1, "a": 1, "b": 2}, "update": {"$rename": {"a": "c"}},
+   "result": {"_id": 1, "b": 2, "c": 1}},
+
+  {"name": "$rename overwrites the target",
+   "doc": {"_id": 1, "a": 1, "b": 2}, "update": {"$rename": {"a": "b"}},
+   "result": {"_id": 1, "b": 1}},
+
+  {"name": "$rename of a missing source is a no-op",
+   "doc": {"_id": 1, "b": 2}, "update": {"$rename": {"a": "c"}},
+   "result": {"_id": 1, "b": 2}, "modified": false},
+
+  {"name": "$rename into a nested path",
+   "doc": {"_id": 1, "a": 1}, "update": {"$rename": {"a": "x.y"}},
+   "result": {"_id": 1, "x": {"y": 1}}},
+
+  {"name": "$rename out of a nested path",
+   "doc": {"_id": 1, "a": {"b": 1, "c": 2}}, "update": {"$rename": {"a.b": "d"}},
+   "result": {"_id": 1, "a": {"c": 2}, "d": 1}},
+
+  {"name": "$rename an array field",
+   "doc": {"_id": 1, "a": [1, 2]}, "update": {"$rename": {"a": "b"}},
+   "result": {"_id": 1, "b": [1, 2]}},
+
+  {"name": "$rename to itself",
+   "doc": {"_id": 1, "a": 1}, "update": {"$rename": {"a": "a"}},
+   "error": "ERR The source and target field for $rename must differ"},
+
+  {"name": "$rename needs a string target",
+   "doc": {"_id": 1, "a": 1}, "update": {"$rename": {"a": 1}},
+   "error": "ERR The 'to' field for $rename must be a string"},
+
+  {"name": "$rename within one path",
+   "doc": {"_id": 1, "a": 1}, "update": {"$rename": {"a": "a.b"}},
+   "error": "ERR The source and target field for $rename must not be on the same path"},
+
+  {"name": "$rename from inside an array",
+   "doc": {"_id": 1, "a": [{"b": 1}]}, "update": {"$rename": {"a.b": "c"}},
+   "error": "ERR The source field cannot be an array element, 'a.b' in doc with {a: [{\"b\":1}]}"},
+
+  {"name": "$rename into an array",
+   "doc": {"_id": 1, "a": 1, "x": [1]}, "update": {"$rename": {"a": "x.y"}},
+   "error": "ERR The destination field cannot be an array element"},
+
+  {"name": "$rename _id",
+   "doc": {"_id": 1}, "update": {"$rename": {"_id": "x"}},
+   "error": "ERR Performing an update on the path '_id' would modify the immutable field '_id'"},
+
+  {"name": "$rename conflicts with $set on the target",
+   "doc": {"_id": 1}, "update": {"$rename": {"a": "b"}, "$set": {"b": 1}},
+   "error": "ERR Updating the path 'b' would create a conflict at 'b'"},
+
+  {"name": "upsert copies equality predicates",
+   "upsert": true, "filter": {"_id": 7, "a": 1, "b": {"$gt": 5}}, "update": {"$set": {"c": 2}},
+   "result": {"_id": 7, "a": 1, "c": 2}},
+
+  {"name": "upsert builds dotted equality paths",
+   "upsert": true, "filter": {"_id": 1, "x.y": 5}, "update": {"$inc": {"n": 1}},
+   "result": {"_id": 1, "x": {"y": 5}, "n": 1}},
+
+  {"name": "upsert runs $setOnInsert",
+   "upsert": true, "filter": {"_id": 1}, "update": {"$set": {"a": 1}, "$setOnInsert": {"b": 2}},
+   "result": {"_id": 1, "a": 1, "b": 2}},
+
+  {"name": "upsert reads $eq and top-level $and",
+   "upsert": true, "filter": {"$and": [{"_id": 3}, {"k": {"$eq": "v"}}]}, "update": {"$set": {"z": 0}},
+   "result": {"_id": 3, "k": "v", "z": 0}},
+
+  {"name": "upsert reads a one-element $in",
+   "upsert": true, "filter": {"_id": {"$in": [4]}}, "update": {"$set": {"a": 1}},
+   "result": {"_id": 4, "a": 1}},
+
+  {"name": "upsert generates an ObjectId _id",
+   "upsert": true, "filter": {"a": 1}, "update": {"$set": {"b": 2}},
+   "result": {"a": 1, "b": 2}, "genId": true},
+
+  {"name": "upsert with an empty filter",
+   "upsert": true, "filter": {}, "update": {"$inc": {"n": 1}},
+   "result": {"n": 1}, "genId": true},
+
+  {"name": "upsert takes _id from $setOnInsert and puts it first",
+   "upsert": true, "filter": {"a": 1}, "update": {"$setOnInsert": {"_id": "x"}},
+   "result": {"_id": "x", "a": 1}},
+
+  {"name": "upsert may not change the query's _id",
+   "upsert": true, "filter": {"_id": 1}, "update": {"$set": {"_id": 2}},
+   "error": "ERR Performing an update on the path '_id' would modify the immutable field '_id'"},
+
+  {"name": "upsert with a path matched twice",
+   "upsert": true, "filter": {"a": 1, "$and": [{"a": 2}]}, "update": {"$set": {"b": 1}},
+   "error": "ERR cannot infer query fields to set, path 'a' is matched twice"},
+
+  {"name": "upsert with overlapping paths",
+   "upsert": true, "filter": {"a": {"b": 1}, "a.c": 2}, "update": {"$set": {"b": 1}},
+   "error": "ERR cannot infer query fields to set, both paths 'a.c' and 'a' are matched"},
+
+  {"name": "upsert skips regexes and $or",
+   "upsert": true, "filter": {"_id": 1, "a": {"$regex": "x"}, "b": {"$regularExpression": {"pattern": "y", "options": ""}}, "$or": [{"c": 1}]}, "update": {"$set": {"d": 1}},
+   "result": {"_id": 1, "d": 1}},
+
+  {"name": "upsert $set overrides a seeded field",
+   "upsert": true, "filter": {"_id": 1, "a": 1}, "update": {"$set": {"a": 2}},
+   "result": {"_id": 1, "a": 2}},
+
+  {"name": "replacement keeps the _id",
+   "doc": {"_id": 1, "a": 1}, "update": {"b": 2},
+   "result": {"_id": 1, "b": 2}},
+
+  {"name": "replacement with the same _id",
+   "doc": {"_id": 1, "a": 1}, "update": {"b": 2, "_id": 1},
+   "result": {"_id": 1, "b": 2}},
+
+  {"name": "replacement changing _id fails",
+   "doc": {"_id": 1, "a": 1}, "update": {"_id": 2},
+   "error": "ERR After applying the update, the (immutable) field '_id' was found to have been altered to _id: 2"},
+
+  {"name": "empty replacement keeps only _id",
+   "doc": {"_id": 1, "a": 1}, "update": {},
+   "result": {"_id": 1}},
+
+  {"name": "identical replacement is a no-op",
+   "doc": {"_id": 1, "a": 1}, "update": {"a": 1},
+   "result": {"_id": 1, "a": 1}, "modified": false},
+
+  {"name": "replacement with an operator field fails",
+   "doc": {"_id": 1}, "update": {"a": 1, "$set": {"b": 1}},
+   "error": "ERR The dollar ($) prefixed field '$set' in '$set' is not valid for storage."},
+
+  {"name": "upsert replacement takes _id from the filter only",
+   "upsert": true, "filter": {"_id": 9, "a": 1}, "update": {"b": 2},
+   "result": {"_id": 9, "b": 2}},
+
+  {"name": "upsert replacement keeps its own _id",
+   "upsert": true, "filter": {"_id": 9}, "update": {"b": 2, "_id": 3},
+   "result": {"_id": 3, "b": 2}},
+
+  {"name": "upsert replacement generates an _id",
+   "upsert": true, "filter": {"a": 1}, "update": {"b": 2},
+   "result": {"b": 2}, "genId": true},
+
+  {"name": "replacement with an array _id is refused on upsert",
+   "upsert": true, "filter": {}, "update": {"_id": [1]},
+   "error": "ERR can't use an array for _id"}
+]

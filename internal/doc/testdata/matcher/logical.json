@@ -1,0 +1,50 @@
+[
+  {"name": "$or",
+   "filter": {"$or": [{"a": 1}, {"b": 2}]},
+   "match": [{"a": 1}, {"b": 2}, {"a": 1, "b": 2}],
+   "nomatch": [{"a": 2, "b": 1}, {}]},
+
+  {"name": "$and of two ranges on one field",
+   "filter": {"$and": [{"a": {"$gt": 1}}, {"a": {"$lt": 5}}]},
+   "match": [{"a": 3}, {"a": [0, 9]}],
+   "nomatch": [{"a": 9}]},
+
+  {"name": "$nor",
+   "filter": {"$nor": [{"a": 1}, {"b": 2}]},
+   "match": [{}, {"a": 2}],
+   "nomatch": [{"a": 1}, {"b": 2}]},
+
+  {"name": "nested logical operators",
+   "filter": {"$or": [{"$and": [{"a": 1}, {"b": 1}]}, {"c": {"$exists": true}}]},
+   "match": [{"a": 1, "b": 1}, {"c": null}],
+   "nomatch": [{"a": 1}]},
+
+  {"name": "$or next to a field predicate",
+   "filter": {"x": 1, "$or": [{"a": 1}, {"a": 2}]},
+   "match": [{"x": 1, "a": 2}],
+   "nomatch": [{"x": 2, "a": 2}, {"x": 1}]},
+
+  {"name": "$nor with $exists",
+   "filter": {"$nor": [{"a": {"$exists": true}}]},
+   "match": [{}],
+   "nomatch": [{"a": null}]},
+
+  {"name": "$alwaysFalse", "filter": {"$alwaysFalse": 1}, "nomatch": [{}]},
+  {"name": "$alwaysTrue", "filter": {"$alwaysTrue": 1}, "match": [{}]},
+
+  {"name": "$or empty", "filter": {"$or": []}, "error": "ERR $and/$or/$nor must be a nonempty array"},
+  {"name": "$or not an array", "filter": {"$or": {"a": 1}}, "error": "ERR $or must be an array"},
+  {"name": "$and entry not a document", "filter": {"$and": [1]}, "error": "ERR $or/$and/$nor entries need to be full objects"},
+  {"name": "unknown top-level operator", "filter": {"$foo": 1}, "error": "ERR unknown top level operator: $foo"},
+  {"name": "unknown field operator", "filter": {"a": {"$foo": 1}}, "error": "ERR unknown operator: $foo"},
+  {"name": "operator document with a plain field", "filter": {"a": {"$gt": 1, "b": 2}}, "error": "ERR unknown operator: b"},
+  {"name": "$where is not in v1", "filter": {"$where": "this.a == 1"}, "error": "ERR unsupported query operator '$where' in v1"},
+  {"name": "$expr is not in v1", "filter": {"$expr": {"$eq": ["$a", 1]}}, "error": "ERR unsupported query operator '$expr' in v1"},
+  {"name": "$bitsAllSet is not in v1", "filter": {"a": {"$bitsAllSet": 3}}, "error": "ERR unsupported query operator '$bitsAllSet' in v1"},
+  {"name": "$in needs an array", "filter": {"a": {"$in": 5}}, "error": "ERR $in needs an array"},
+  {"name": "$nin needs an array", "filter": {"a": {"$nin": 5}}, "error": "ERR $nin needs an array"},
+  {"name": "$in refuses operators", "filter": {"a": {"$in": [{"$gt": 1}]}}, "error": "ERR cannot nest $ under $in"},
+  {"name": "$ne refuses a regex", "filter": {"a": {"$ne": {"$regularExpression": {"pattern": "x", "options": ""}}}}, "error": "ERR Can't have regex as arg to $ne."},
+  {"name": "geo without hooks", "filter": {"loc": {"$near": [0, 0]}}, "error": "ERR geo operators need a geo index or hooks"},
+  {"name": "$maxDistance without $near", "filter": {"a": {"$maxDistance": 5}}, "error": "ERR $maxDistance and $minDistance are only valid with $near or $nearSphere"}
+]
