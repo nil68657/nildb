@@ -1,0 +1,169 @@
+[
+  {"name": "$exists true includes null",
+   "filter": {"a": {"$exists": true}},
+   "match": [{"a": null}, {"a": 0}, {"a": []}, {"a": false}],
+   "nomatch": [{}, {"b": 1}]},
+
+  {"name": "$exists false matches only a missing field",
+   "filter": {"a": {"$exists": false}},
+   "match": [{}, {"b": 1}],
+   "nomatch": [{"a": null}]},
+
+  {"name": "$exists takes a number as its flag",
+   "filter": {"a": {"$exists": 0}},
+   "match": [{}],
+   "nomatch": [{"a": 1}]},
+
+  {"name": "$exists with 1",
+   "filter": {"a": {"$exists": 1}},
+   "match": [{"a": 1}],
+   "nomatch": [{}]},
+
+  {"name": "$exists through an array of documents",
+   "filter": {"a.b": {"$exists": true}},
+   "match": [{"a": [{"c": 1}, {"b": null}]}],
+   "nomatch": [{"a": [{"c": 1}]}, {"a": [1, 2]}]},
+
+  {"name": "$exists false through an array of documents",
+   "filter": {"a.b": {"$exists": false}},
+   "match": [{"a": [{"c": 1}]}, {"a": [1]}],
+   "nomatch": [{"a": [{"b": 1}, {"c": 1}]}]},
+
+  {"name": "$type by alias",
+   "filter": {"a": {"$type": "string"}},
+   "match": [{"a": "x"}, {"a": ["x", 1]}],
+   "nomatch": [{"a": {"$symbol": "x"}}, {"a": 1}, {}]},
+
+  {"name": "$type number alias covers all four numeric types",
+   "filter": {"a": {"$type": "number"}},
+   "match": [{"a": 1}, {"a": 1.5}, {"a": {"$numberLong": "1"}}, {"a": {"$numberDecimal": "1"}}],
+   "nomatch": [{"a": "1"}]},
+
+  {"name": "$type array matches the array itself",
+   "filter": {"a": {"$type": "array"}},
+   "match": [{"a": []}, {"a": [1]}],
+   "nomatch": [{"a": 1}, {}]},
+
+  {"name": "$type by numeric code",
+   "filter": {"a": {"$type": 16}},
+   "match": [{"a": 1}],
+   "nomatch": [{"a": 1.0}, {"a": {"$numberLong": "1"}}]},
+
+  {"name": "$type with a list",
+   "filter": {"a": {"$type": ["null", "bool"]}},
+   "match": [{"a": null}, {"a": true}],
+   "nomatch": [{}, {"a": 0}]},
+
+  {"name": "$type minKey by code -1",
+   "filter": {"a": {"$type": -1}},
+   "match": [{"a": {"$minKey": 1}}],
+   "nomatch": [{"a": null}]},
+
+  {"name": "$type object and date",
+   "filter": {"a": {"$type": ["object", "date"]}},
+   "match": [{"a": {}}, {"a": {"$date": "2020-01-01T00:00:00Z"}}],
+   "nomatch": [{"a": "2020"}]},
+
+  {"name": "$type unknown alias", "filter": {"a": {"$type": "foo"}}, "error": "ERR Unknown type name alias: foo"},
+  {"name": "$type unknown code", "filter": {"a": {"$type": 42}}, "error": "ERR Invalid numerical type code: 42"},
+  {"name": "$type empty list", "filter": {"a": {"$type": []}}, "error": "ERR $type must match at least one type"},
+
+  {"name": "$mod truncates the value",
+   "filter": {"a": {"$mod": [4, 1]}},
+   "match": [{"a": 5}, {"a": 9.9}, {"a": [2, 13]}, {"a": {"$numberLong": "1"}}],
+   "nomatch": [{"a": 4}, {"a": "5"}, {}, {"a": {"$numberDouble": "NaN"}}]},
+
+  {"name": "$mod with a negative remainder",
+   "filter": {"a": {"$mod": [4, -1]}},
+   "match": [{"a": -5}],
+   "nomatch": [{"a": 3}]},
+
+  {"name": "$mod truncates a double divisor",
+   "filter": {"a": {"$mod": [4.5, 0]}},
+   "match": [{"a": 8}],
+   "nomatch": [{"a": 9}]},
+
+  {"name": "$mod divisor zero", "filter": {"a": {"$mod": [0, 1]}}, "error": "ERR divisor cannot be 0"},
+  {"name": "$mod one element", "filter": {"a": {"$mod": [4]}}, "error": "ERR malformed mod, not enough elements"},
+  {"name": "$mod not an array", "filter": {"a": {"$mod": 4}}, "error": "ERR malformed mod, needs to be an array"},
+  {"name": "$mod three elements", "filter": {"a": {"$mod": [4, 1, 2]}}, "error": "ERR malformed mod, too many elements"},
+  {"name": "$mod string divisor", "filter": {"a": {"$mod": ["x", 1]}}, "error": "ERR malformed mod, divisor not a number"},
+
+  {"name": "$regex matches strings and symbols anywhere",
+   "filter": {"a": {"$regex": "b.c"}},
+   "match": [{"a": "abxc"}, {"a": ["zz", "bbc"]}, {"a": {"$symbol": "bxc"}}],
+   "nomatch": [{"a": "bc"}, {"a": 5}, {}]},
+
+  {"name": "$regex with the i option",
+   "filter": {"a": {"$regex": "^abc$", "$options": "i"}},
+   "match": [{"a": "ABC"}],
+   "nomatch": [{"a": "ABCD"}]},
+
+  {"name": "regex literal with options",
+   "filter": {"a": {"$regularExpression": {"pattern": "^abc$", "options": "i"}}},
+   "match": [{"a": "aBc"}],
+   "nomatch": [{"a": "xabc"}]},
+
+  {"name": "$regex with the m option anchors at lines",
+   "filter": {"a": {"$regex": "^b", "$options": "m"}},
+   "match": [{"a": "a\nb"}],
+   "nomatch": [{"a": "ab"}]},
+
+  {"name": "$regex without m anchors at the start",
+   "filter": {"a": {"$regex": "^b"}},
+   "nomatch": [{"a": "a\nb"}]},
+
+  {"name": "$regex with the s option lets dot match newline",
+   "filter": {"a": {"$regex": "a.b", "$options": "s"}},
+   "match": [{"a": "a\nb"}]},
+
+  {"name": "$regex without s",
+   "filter": {"a": {"$regex": "a.b"}},
+   "nomatch": [{"a": "a\nb"}]},
+
+  {"name": "$regex with the x option drops whitespace and comments",
+   "filter": {"a": {"$regex": "a b # comment\n c", "$options": "x"}},
+   "match": [{"a": "abc"}],
+   "nomatch": [{"a": "a b c"}]},
+
+  {"name": "$regex x option keeps escaped spaces and class members",
+   "filter": {"a": {"$regex": "^a\\ b[ ]c$", "$options": "x"}},
+   "match": [{"a": "a b c"}],
+   "nomatch": [{"a": "abc"}]},
+
+  {"name": "a regex also matches an identical stored regex",
+   "filter": {"a": {"$regularExpression": {"pattern": "x", "options": ""}}},
+   "match": [{"a": {"$regularExpression": {"pattern": "x", "options": ""}}}, {"a": "x"}],
+   "nomatch": [{"a": {"$regularExpression": {"pattern": "x", "options": "i"}}}]},
+
+  {"name": "$regex with a regex value and separate $options",
+   "filter": {"a": {"$regex": {"$regularExpression": {"pattern": "^A", "options": ""}}, "$options": "i"}},
+   "match": [{"a": "abc"}]},
+
+  {"name": "$regex unbalanced", "filter": {"a": {"$regex": "(a"}}, "error": "ERR Regular expression is invalid"},
+  {"name": "$regex backreference", "filter": {"a": {"$regex": "(a)\\1"}}, "error": "ERR Regular expression is invalid"},
+  {"name": "$regex lookahead", "filter": {"a": {"$regex": "a(?=b)"}}, "error": "ERR Regular expression is invalid"},
+  {"name": "$regex bad option", "filter": {"a": {"$regex": "a", "$options": "g"}}, "error": "ERR invalid flag in regex options: g"},
+  {"name": "$options alone", "filter": {"a": {"$options": "i"}}, "error": "ERR $options needs a $regex"},
+  {"name": "$regex not a string", "filter": {"a": {"$regex": 5}}, "error": "ERR $regex has to be a string"},
+  {"name": "$regex options twice", "filter": {"a": {"$regex": {"$regularExpression": {"pattern": "a", "options": "i"}}, "$options": "m"}}, "error": "ERR options set in both $regex and $options"},
+
+  {"name": "$not with a regex matches missing and non-strings",
+   "filter": {"a": {"$not": {"$regularExpression": {"pattern": "^a", "options": ""}}}},
+   "match": [{"a": "ba"}, {}, {"a": 5}],
+   "nomatch": [{"a": "ab"}, {"a": ["x", "ay"]}]},
+
+  {"name": "$not with operators matches missing",
+   "filter": {"a": {"$not": {"$gt": 5}}},
+   "match": [{"a": 5}, {}, {"a": "z"}, {"a": [1, 2]}],
+   "nomatch": [{"a": 6}, {"a": [1, 6]}]},
+
+  {"name": "$not with $regex operator",
+   "filter": {"a": {"$not": {"$regex": "^a"}}},
+   "match": [{"a": "b"}],
+   "nomatch": [{"a": "abc"}]},
+
+  {"name": "$not needs a regex or document", "filter": {"a": {"$not": 5}}, "error": "ERR $not needs a regex or a document"},
+  {"name": "$not cannot be empty", "filter": {"a": {"$not": {}}}, "error": "ERR $not cannot be empty"},
+  {"name": "$not needs operators", "filter": {"a": {"$not": {"b": 1}}}, "error": "ERR $not needs a regex or a document"}
+]

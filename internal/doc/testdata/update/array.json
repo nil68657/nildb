@@ -1,0 +1,178 @@
+[
+  {"name": "$push appends",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$push": {"a": 2}},
+   "result": {"_id": 1, "a": [1, 2]}},
+
+  {"name": "$push creates the array",
+   "doc": {"_id": 1}, "update": {"$push": {"a": 1}},
+   "result": {"_id": 1, "a": [1]}},
+
+  {"name": "$push an array adds it as one element",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$push": {"a": [2, 3]}},
+   "result": {"_id": 1, "a": [1, [2, 3]]}},
+
+  {"name": "$push onto a non-array fails",
+   "doc": {"_id": 1, "a": 1}, "update": {"$push": {"a": 2}},
+   "error": "ERR The field 'a' must be an array but is of type int in document {_id: 1}"},
+
+  {"name": "$push $each",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$push": {"a": {"$each": [2, 3]}}},
+   "result": {"_id": 1, "a": [1, 2, 3]}},
+
+  {"name": "$push $each with $position",
+   "doc": {"_id": 1, "a": [1, 2, 3]}, "update": {"$push": {"a": {"$each": [9], "$position": 1}}},
+   "result": {"_id": 1, "a": [1, 9, 2, 3]}},
+
+  {"name": "$push with a negative $position counts from the end",
+   "doc": {"_id": 1, "a": [1, 2, 3]}, "update": {"$push": {"a": {"$each": [9], "$position": -1}}},
+   "result": {"_id": 1, "a": [1, 2, 9, 3]}},
+
+  {"name": "$push with $position past the end appends",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$push": {"a": {"$each": [9], "$position": 10}}},
+   "result": {"_id": 1, "a": [1, 9]}},
+
+  {"name": "$push with a positive $slice keeps the front",
+   "doc": {"_id": 1, "a": [1, 2]}, "update": {"$push": {"a": {"$each": [3, 4], "$slice": 3}}},
+   "result": {"_id": 1, "a": [1, 2, 3]}},
+
+  {"name": "$push with a negative $slice keeps the back",
+   "doc": {"_id": 1, "a": [1, 2]}, "update": {"$push": {"a": {"$each": [3, 4], "$slice": -2}}},
+   "result": {"_id": 1, "a": [3, 4]}},
+
+  {"name": "$push with $slice 0 empties the array",
+   "doc": {"_id": 1, "a": [1, 2]}, "update": {"$push": {"a": {"$each": [3], "$slice": 0}}},
+   "result": {"_id": 1, "a": []}},
+
+  {"name": "$push with $sort ascending",
+   "doc": {"_id": 1, "a": [3, 1]}, "update": {"$push": {"a": {"$each": [2], "$sort": 1}}},
+   "result": {"_id": 1, "a": [1, 2, 3]}},
+
+  {"name": "$push with $sort descending across types",
+   "doc": {"_id": 1, "a": ["b", 1]}, "update": {"$push": {"a": {"$each": [null], "$sort": -1}}},
+   "result": {"_id": 1, "a": ["b", 1, null]}},
+
+  {"name": "$push sorts by a field then slices",
+   "doc": {"_id": 1, "a": [{"s": 5}, {"s": 1}]}, "update": {"$push": {"a": {"$each": [{"s": 3}], "$sort": {"s": -1}, "$slice": 2}}},
+   "result": {"_id": 1, "a": [{"s": 5}, {"s": 3}]}},
+
+  {"name": "$push with an empty $each creates an empty array",
+   "doc": {"_id": 1}, "update": {"$push": {"a": {"$each": []}}},
+   "result": {"_id": 1, "a": []}},
+
+  {"name": "$push $each must be an array",
+   "doc": {"_id": 1}, "update": {"$push": {"a": {"$each": 5}}},
+   "error": "ERR The argument to $each in $push must be an array but it was of type: int"},
+
+  {"name": "$push with an unknown clause",
+   "doc": {"_id": 1}, "update": {"$push": {"a": {"$each": [1], "$foo": 1}}},
+   "error": "ERR Unrecognized clause in $push: $foo"},
+
+  {"name": "$push with a bad $sort",
+   "doc": {"_id": 1}, "update": {"$push": {"a": {"$each": [1], "$sort": 2}}},
+   "error": "ERR The $sort is invalid"},
+
+  {"name": "$push with a fractional $slice",
+   "doc": {"_id": 1}, "update": {"$push": {"a": {"$each": [1], "$slice": 1.5}}},
+   "error": "ERR The value for $slice must be an integer value but was given type: double"},
+
+  {"name": "$addToSet adds a new value",
+   "doc": {"_id": 1, "a": [1, 2]}, "update": {"$addToSet": {"a": 3}},
+   "result": {"_id": 1, "a": [1, 2, 3]}},
+
+  {"name": "$addToSet of a present value is a no-op",
+   "doc": {"_id": 1, "a": [1, 2]}, "update": {"$addToSet": {"a": 2}},
+   "result": {"_id": 1, "a": [1, 2]}, "modified": false},
+
+  {"name": "$addToSet treats equal numbers as present",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$addToSet": {"a": 1.0}},
+   "result": {"_id": 1, "a": [1]}, "modified": false},
+
+  {"name": "$addToSet $each skips present and repeated values",
+   "doc": {"_id": 1, "a": [1]}, "update": {"$addToSet": {"a": {"$each": [1, 2, 2, 3]}}},
+   "result": {"_id": 1, "a": [1, 2, 3]}},
+
+  {"name": "$addToSet compares documents with field order",
+   "doc": {"_id": 1, "a": [{"x": 1, "y": 2}]}, "update": {"$addToSet": {"a": {"y": 2, "x": 1}}},
+   "result": {"_id": 1, "a": [{"x": 1, "y": 2}, {"y": 2, "x": 1}]}},
+
+  {"name": "$addToSet creates the array",
+   "doc": {"_id": 1}, "update": {"$addToSet": {"a": 5}},
+   "result": {"_id": 1, "a": [5]}},
+
+  {"name": "$addToSet on a non-array fails",
+   "doc": {"_id": 1, "a": 1}, "update": {"$addToSet": {"a": 2}},
+   "error": "ERR Cannot apply $addToSet to non-array field. Field named 'a' has non-array type int"},
+
+  {"name": "$pop 1 removes the last element",
+   "doc": {"_id": 1, "a": [1, 2, 3]}, "update": {"$pop": {"a": 1}},
+   "result": {"_id": 1, "a": [1, 2]}},
+
+  {"name": "$pop -1 removes the first element",
+   "doc": {"_id": 1, "a": [1, 2, 3]}, "update": {"$pop": {"a": -1}},
+   "result": {"_id": 1, "a": [2, 3]}},
+
+  {"name": "$pop an empty array is a no-op",
+   "doc": {"_id": 1, "a": []}, "update": {"$pop": {"a": 1}},
+   "result": {"_id": 1, "a": []}, "modified": false},
+
+  {"name": "$pop a missing field is a no-op",
+   "doc": {"_id": 1}, "update": {"$pop": {"a": 1}},
+   "result": {"_id": 1}, "modified": false},
+
+  {"name": "$pop takes only 1 or -1",
+   "doc": {"_id": 1}, "update": {"$pop": {"a": 2}},
+   "error": "ERR $pop expects 1 or -1, found: 2"},
+
+  {"name": "$pop on a non-array fails",
+   "doc": {"_id": 1, "a": 1}, "update": {"$pop": {"a": 1}},
+   "error": "ERR Path 'a' contains an element of non-array type 'int'"},
+
+  {"name": "$pull removes equal values",
+   "doc": {"_id": 1, "a": [1, 2, 1, 3]}, "update": {"$pull": {"a": 1}},
+   "result": {"_id": 1, "a": [2, 3]}},
+
+  {"name": "$pull with a condition",
+   "doc": {"_id": 1, "a": [1, 5, 8]}, "update": {"$pull": {"a": {"$gte": 5}}},
+   "result": {"_id": 1, "a": [1]}},
+
+  {"name": "$pull applies a query to each element document",
+   "doc": {"_id": 1, "results": [{"item": "A", "score": 5}, {"item": "B", "score": 8, "comment": "x"}]},
+   "update": {"$pull": {"results": {"score": 8, "item": "B"}}},
+   "result": {"_id": 1, "results": [{"item": "A", "score": 5}]}},
+
+  {"name": "$pull with $in",
+   "doc": {"_id": 1, "a": ["a", "b", "c"]}, "update": {"$pull": {"a": {"$in": ["a", "c"]}}},
+   "result": {"_id": 1, "a": ["b"]}},
+
+  {"name": "$pull with a regex",
+   "doc": {"_id": 1, "a": ["apple", "banana"]}, "update": {"$pull": {"a": {"$regularExpression": {"pattern": "^a", "options": ""}}}},
+   "result": {"_id": 1, "a": ["banana"]}},
+
+  {"name": "$pull that removes nothing is a no-op",
+   "doc": {"_id": 1, "a": [1, 2]}, "update": {"$pull": {"a": 9}},
+   "result": {"_id": 1, "a": [1, 2]}, "modified": false},
+
+  {"name": "$pull on a non-array fails",
+   "doc": {"_id": 1, "a": 1}, "update": {"$pull": {"a": 1}},
+   "error": "ERR Cannot apply $pull to a non-array value"},
+
+  {"name": "$pull an array value removes equal arrays",
+   "doc": {"_id": 1, "a": [[1, 2], [3]]}, "update": {"$pull": {"a": [1, 2]}},
+   "result": {"_id": 1, "a": [[3]]}},
+
+  {"name": "$pull with $elemMatch inside an element query",
+   "doc": {"_id": 1, "a": [{"b": [1, 2]}, {"b": [3]}]}, "update": {"$pull": {"a": {"b": {"$elemMatch": {"$eq": 3}}}}},
+   "result": {"_id": 1, "a": [{"b": [1, 2]}]}},
+
+  {"name": "$pull with $or over element documents",
+   "doc": {"_id": 1, "a": [{"x": 1}, {"y": 2}, {"z": 3}]}, "update": {"$pull": {"a": {"$or": [{"x": 1}, {"y": 2}]}}},
+   "result": {"_id": 1, "a": [{"z": 3}]}},
+
+  {"name": "$pullAll",
+   "doc": {"_id": 1, "a": [1, 2, 3, 1]}, "update": {"$pullAll": {"a": [1, 3]}},
+   "result": {"_id": 1, "a": [2]}},
+
+  {"name": "$pullAll needs an array",
+   "doc": {"_id": 1}, "update": {"$pullAll": {"a": 1}},
+   "error": "ERR $pullAll requires an array argument but was given a int"}
+]

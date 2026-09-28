@@ -1,0 +1,97 @@
+[
+  {"name": "inclusion keeps _id",
+   "projection": {"a": 1}, "doc": {"_id": 1, "a": 1, "b": 2},
+   "result": {"_id": 1, "a": 1}},
+
+  {"name": "inclusion keeps document order",
+   "projection": {"b": 1, "a": 1}, "doc": {"_id": 1, "a": 1, "b": 2, "c": 3},
+   "result": {"_id": 1, "a": 1, "b": 2}},
+
+  {"name": "inclusion without _id",
+   "projection": {"a": 1, "_id": 0}, "doc": {"_id": 1, "a": 1, "b": 2},
+   "result": {"a": 1}},
+
+  {"name": "inclusion with booleans",
+   "projection": {"a": true}, "doc": {"_id": 1, "a": 1, "b": 2},
+   "result": {"_id": 1, "a": 1}},
+
+  {"name": "inclusion of a missing field",
+   "projection": {"z": 1}, "doc": {"_id": 1, "a": 1},
+   "result": {"_id": 1}},
+
+  {"name": "exclusion",
+   "projection": {"a": 0}, "doc": {"_id": 1, "a": 1, "b": 2},
+   "result": {"_id": 1, "b": 2}},
+
+  {"name": "exclusion of _id alone",
+   "projection": {"_id": 0}, "doc": {"_id": 1, "a": 1, "b": 2},
+   "result": {"a": 1, "b": 2}},
+
+  {"name": "inclusion of _id alone",
+   "projection": {"_id": 1}, "doc": {"_id": 1, "a": 1},
+   "result": {"_id": 1}},
+
+  {"name": "exclusion with an explicit _id: 1",
+   "projection": {"a": 0, "_id": 1}, "doc": {"_id": 1, "a": 1, "b": 2},
+   "result": {"_id": 1, "b": 2}},
+
+  {"name": "dotted inclusion",
+   "projection": {"a.b": 1}, "doc": {"_id": 1, "a": {"b": 1, "c": 2}, "d": 3},
+   "result": {"_id": 1, "a": {"b": 1}}},
+
+  {"name": "nested spec means a dotted path",
+   "projection": {"a": {"b": 1}}, "doc": {"_id": 1, "a": {"b": 1, "c": 2}, "d": 3},
+   "result": {"_id": 1, "a": {"b": 1}}},
+
+  {"name": "dotted inclusion of a missing subfield keeps an empty document",
+   "projection": {"a.x": 1}, "doc": {"_id": 1, "a": {"b": 1}},
+   "result": {"_id": 1, "a": {}}},
+
+  {"name": "dotted inclusion drops a scalar parent",
+   "projection": {"a.b": 1}, "doc": {"_id": 1, "a": 5},
+   "result": {"_id": 1}},
+
+  {"name": "dotted inclusion through arrays drops scalars",
+   "projection": {"a.b": 1}, "doc": {"_id": 1, "a": [{"b": 1, "c": 2}, {"c": 3}, 5, [{"b": 4, "c": 5}]]},
+   "result": {"_id": 1, "a": [{"b": 1}, {}, [{"b": 4}]]}},
+
+  {"name": "dotted exclusion through arrays keeps scalars",
+   "projection": {"a.b": 0}, "doc": {"_id": 1, "a": [{"b": 1, "c": 2}, {"c": 3}, 5, [{"b": 4, "c": 5}]]},
+   "result": {"_id": 1, "a": [{"c": 2}, {"c": 3}, 5, [{"c": 5}]]}},
+
+  {"name": "dotted exclusion",
+   "projection": {"a.b": 0}, "doc": {"_id": 1, "a": {"b": 1, "c": 2}},
+   "result": {"_id": 1, "a": {"c": 2}}},
+
+  {"name": "two-level exclusion",
+   "projection": {"a.b.c": 0}, "doc": {"_id": 1, "a": {"b": {"c": 1, "d": 2}, "e": 3}},
+   "result": {"_id": 1, "a": {"b": {"d": 2}, "e": 3}}},
+
+  {"name": "a numeric component is a field name",
+   "projection": {"a.0": 1}, "doc": {"_id": 1, "a": [{"0": 1, "1": 2}, 7]},
+   "result": {"_id": 1, "a": [{"0": 1}]}},
+
+  {"name": "a sub-path of _id",
+   "projection": {"_id.x": 1}, "doc": {"_id": {"x": 1, "y": 2}, "a": 1},
+   "result": {"_id": {"x": 1}}},
+
+  {"name": "several dotted paths under one parent",
+   "projection": {"a.b": 1, "a.c": 1, "_id": 0}, "doc": {"_id": 1, "a": {"c": 3, "b": 2, "d": 4}},
+   "result": {"a": {"c": 3, "b": 2}}},
+
+  {"name": "empty projection returns the document",
+   "projection": {}, "doc": {"_id": 1, "a": 1},
+   "result": {"_id": 1, "a": 1}},
+
+  {"name": "exclusion inside inclusion", "projection": {"a": 1, "b": 0}, "error": "ERR Cannot do exclusion on field b in inclusion projection"},
+  {"name": "inclusion inside exclusion", "projection": {"a": 0, "b": 1}, "error": "ERR Cannot do inclusion on field b in exclusion projection"},
+  {"name": "path collision, prefix first", "projection": {"a": 1, "a.b": 1}, "error": "ERR Path collision at a.b remaining portion b"},
+  {"name": "path collision, prefix last", "projection": {"a.b": 1, "a": 1}, "error": "ERR Path collision at a"},
+  {"name": "$slice is not in v1", "projection": {"a": {"$slice": 1}}, "error": "ERR unsupported projection operator '$slice' in v1"},
+  {"name": "$elemMatch is not in v1", "projection": {"a": {"$elemMatch": {"b": 1}}}, "error": "ERR unsupported projection operator '$elemMatch' in v1"},
+  {"name": "empty sub-projection", "projection": {"a": {}}, "error": "ERR An empty sub-projection is not a valid value. Found empty object at path a"},
+  {"name": "computed field is not in v1", "projection": {"a": "$b"}, "error": "ERR unsupported projection value for field 'a' in v1"},
+  {"name": "empty path component", "projection": {"a..b": 1}, "error": "ERR FieldPath field names may not be empty strings."},
+  {"name": "positional projection is not in v1", "projection": {"a.$": 1}, "error": "ERR positional projection is not supported in v1"},
+  {"name": "dollar field name", "projection": {"$a": 1}, "error": "ERR FieldPath field names may not start with '$'."}
+]

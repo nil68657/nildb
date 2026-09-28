@@ -1,0 +1,132 @@
+[
+  {"name": "$gt brackets by type class",
+   "filter": {"a": {"$gt": 5}},
+   "match": [{"a": 6}, {"a": 5.5}, {"a": {"$numberLong": "7"}}, {"a": [1, 10]}, {"a": {"$numberDouble": "Infinity"}}, {"a": {"$numberDecimal": "5.0000000001"}}],
+   "nomatch": [{"a": 5}, {"a": "6"}, {"a": null}, {}, {"a": true}, {"a": [1, 2]}, {"a": {"$numberDouble": "NaN"}}, {"a": {"b": 6}}, {"a": {"$date": "2020-01-01T00:00:00Z"}}]},
+
+  {"name": "$gte includes the bound",
+   "filter": {"a": {"$gte": 5}},
+   "match": [{"a": 5}, {"a": 5.0}, {"a": {"$numberDecimal": "5.000"}}],
+   "nomatch": [{"a": 4.999}, {"a": "5"}]},
+
+  {"name": "$lt on strings is bytewise and includes symbols",
+   "filter": {"a": {"$lt": "b"}},
+   "match": [{"a": "a"}, {"a": "B"}, {"a": ""}, {"a": {"$symbol": "a"}}, {"a": ["z", "a"]}],
+   "nomatch": [{"a": "b"}, {"a": "ba"}, {"a": 1}, {}, {"a": null}]},
+
+  {"name": "$lte on strings",
+   "filter": {"a": {"$lte": "b"}},
+   "match": [{"a": "b"}, {"a": "a\u0000"}],
+   "nomatch": [{"a": "b\u0000"}, {"a": "c"}]},
+
+  {"name": "a range may be satisfied by different array elements",
+   "filter": {"a": {"$gt": 1, "$lt": 5}},
+   "match": [{"a": 3}, {"a": [0, 10]}, {"a": [3]}],
+   "nomatch": [{"a": [0, 0]}, {"a": [10, 10]}, {"a": 6}]},
+
+  {"name": "$elemMatch pins a range to one element",
+   "filter": {"a": {"$elemMatch": {"$gt": 1, "$lt": 5}}},
+   "match": [{"a": [0, 3]}, {"a": [3]}],
+   "nomatch": [{"a": [0, 10]}, {"a": 3}, {}]},
+
+  {"name": "$gte null matches null and missing only",
+   "filter": {"a": {"$gte": null}},
+   "match": [{"a": null}, {}],
+   "nomatch": [{"a": 1}, {"a": {"$undefined": true}}, {"a": {"$minKey": 1}}]},
+
+  {"name": "$lte null matches null and missing only",
+   "filter": {"a": {"$lte": null}},
+   "match": [{"a": null}, {}],
+   "nomatch": [{"a": 0}, {"a": {"$minKey": 1}}]},
+
+  {"name": "$lt null matches nothing",
+   "filter": {"a": {"$lt": null}},
+   "nomatch": [{}, {"a": null}, {"a": 1}, {"a": {"$minKey": 1}}]},
+
+  {"name": "$gt null matches nothing",
+   "filter": {"a": {"$gt": null}},
+   "nomatch": [{}, {"a": null}, {"a": 1}, {"a": "x"}]},
+
+  {"name": "$gt MinKey crosses type classes",
+   "filter": {"a": {"$gt": {"$minKey": 1}}},
+   "match": [{"a": 1}, {"a": "x"}, {"a": null}, {"a": {"$maxKey": 1}}, {"a": [1]}],
+   "nomatch": [{"a": {"$minKey": 1}}]},
+
+  {"name": "$lt MaxKey crosses type classes",
+   "filter": {"a": {"$lt": {"$maxKey": 1}}},
+   "match": [{"a": 1}, {"a": {"$minKey": 1}}, {"a": {"$date": "2020-01-01T00:00:00Z"}}],
+   "nomatch": [{"a": {"$maxKey": 1}}]},
+
+  {"name": "$lte MaxKey includes MaxKey",
+   "filter": {"a": {"$lte": {"$maxKey": 1}}},
+   "match": [{"a": {"$maxKey": 1}}, {"a": "z"}]},
+
+  {"name": "NaN is not below zero for $lt",
+   "filter": {"a": {"$lt": 0}},
+   "match": [{"a": -1}, {"a": {"$numberDouble": "-Infinity"}}],
+   "nomatch": [{"a": {"$numberDouble": "NaN"}}, {"a": 0}]},
+
+  {"name": "$gte NaN matches only NaN",
+   "filter": {"a": {"$gte": {"$numberDouble": "NaN"}}},
+   "match": [{"a": {"$numberDouble": "NaN"}}],
+   "nomatch": [{"a": 1}, {"a": {"$numberDouble": "-Infinity"}}]},
+
+  {"name": "$gt NaN matches nothing",
+   "filter": {"a": {"$gt": {"$numberDouble": "NaN"}}},
+   "nomatch": [{"a": {"$numberDouble": "NaN"}}, {"a": 1}]},
+
+  {"name": "int64 against a double at 2^53",
+   "filter": {"a": {"$gt": 9007199254740992.0}},
+   "match": [{"a": {"$numberLong": "9007199254740993"}}],
+   "nomatch": [{"a": {"$numberLong": "9007199254740992"}}]},
+
+  {"name": "int64 max against 2^63 as a double",
+   "filter": {"a": {"$lt": 9223372036854775808.0}},
+   "match": [{"a": {"$numberLong": "9223372036854775807"}}],
+   "nomatch": [{"a": 9223372036854775808.0}]},
+
+  {"name": "Decimal128 range bounds are exact",
+   "filter": {"a": {"$gt": {"$numberDecimal": "1.5"}}},
+   "match": [{"a": 2}, {"a": 1.6}, {"a": {"$numberDecimal": "1.50000000001"}}],
+   "nomatch": [{"a": 1.5}, {"a": {"$numberDecimal": "1.500"}}, {"a": 1}]},
+
+  {"name": "date range",
+   "filter": {"a": {"$gte": {"$date": "2020-01-01T00:00:00Z"}}},
+   "match": [{"a": {"$date": "2021-06-01T00:00:00Z"}}, {"a": {"$date": "2020-01-01T00:00:00Z"}}],
+   "nomatch": [{"a": {"$date": "2019-12-31T23:59:59Z"}}, {"a": 1600000000000}, {"a": "2021-01-01"}]},
+
+  {"name": "timestamp range compares t then i",
+   "filter": {"a": {"$gt": {"$timestamp": {"t": 1, "i": 1}}}},
+   "match": [{"a": {"$timestamp": {"t": 2, "i": 0}}}, {"a": {"$timestamp": {"t": 1, "i": 2}}}],
+   "nomatch": [{"a": {"$timestamp": {"t": 1, "i": 1}}}, {"a": {"$date": "2020-01-01T00:00:00Z"}}]},
+
+  {"name": "object comparison goes field by field",
+   "filter": {"a": {"$gt": {"x": 1}}},
+   "match": [{"a": {"x": 2}}, {"a": {"x": 1, "y": 0}}, {"a": {"y": 0}}, {"a": {"x": "a"}}],
+   "nomatch": [{"a": {"x": 1}}, {"a": {"x": 0}}, {"a": [1]}, {"a": {}}]},
+
+  {"name": "array operand compares whole arrays",
+   "filter": {"a": {"$gt": [1]}},
+   "match": [{"a": [2]}, {"a": [1, 0]}, {"a": [[5]]}],
+   "nomatch": [{"a": [1]}, {"a": 2}, {"a": [0, 2]}]},
+
+  {"name": "boolean range",
+   "filter": {"a": {"$lt": true}},
+   "match": [{"a": false}],
+   "nomatch": [{"a": 0}, {"a": true}]},
+
+  {"name": "ObjectId range",
+   "filter": {"_id": {"$gt": {"$oid": "000000000000000000000001"}}},
+   "match": [{"_id": {"$oid": "000000000000000000000002"}}, {"_id": {"$oid": "ff0000000000000000000000"}}],
+   "nomatch": [{"_id": {"$oid": "000000000000000000000000"}}, {"_id": 5}]},
+
+  {"name": "BinData compares length before bytes",
+   "filter": {"a": {"$gt": {"$binary": {"base64": "AQI=", "subType": "00"}}}},
+   "match": [{"a": {"$binary": {"base64": "AAAA", "subType": "00"}}}, {"a": {"$binary": {"base64": "AQI=", "subType": "80"}}}],
+   "nomatch": [{"a": {"$binary": {"base64": "/w==", "subType": "00"}}}, {"a": {"$binary": {"base64": "AQI=", "subType": "00"}}}]},
+
+  {"name": "range through an array of documents",
+   "filter": {"a.b": {"$lte": 2}},
+   "match": [{"a": [{"b": 5}, {"b": 2}]}, {"a": {"b": [9, 1]}}],
+   "nomatch": [{"a": [{"b": 5}, {"c": 1}]}, {"a": [3, 1]}]}
+]

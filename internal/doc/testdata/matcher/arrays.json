@@ -1,0 +1,147 @@
+[
+  {"name": "$size matches the array length exactly",
+   "filter": {"a": {"$size": 2}},
+   "match": [{"a": [1, 2]}, {"a": [[1, 2, 3], 4]}, {"a": [null, null]}],
+   "nomatch": [{"a": [1]}, {"a": [[1, 2]]}, {"a": 2}, {}, {"a": "ab"}]},
+
+  {"name": "$size 0 needs an empty array",
+   "filter": {"a": {"$size": 0}},
+   "match": [{"a": []}],
+   "nomatch": [{}, {"a": null}, {"a": [1]}]},
+
+  {"name": "$size accepts a whole double",
+   "filter": {"a": {"$size": 1.0}},
+   "match": [{"a": ["x"]}]},
+
+  {"name": "$size through an array of documents",
+   "filter": {"a.b": {"$size": 1}},
+   "match": [{"a": [{"b": [1]}, {"b": 5}]}],
+   "nomatch": [{"a": [{"b": 1}]}]},
+
+  {"name": "$size needs a number", "filter": {"a": {"$size": "2"}}, "error": "ERR $size needs a number"},
+  {"name": "$size needs a whole number", "filter": {"a": {"$size": 1.5}}, "error": "ERR $size must be a whole number"},
+  {"name": "$size may not be negative", "filter": {"a": {"$size": -1}}, "error": "ERR $size may not be negative"},
+
+  {"name": "$all needs every value, in any order",
+   "filter": {"a": {"$all": [1, 2]}},
+   "match": [{"a": [1, 2]}, {"a": [2, 3, 1]}, {"a": [[1], 1, 2]}],
+   "nomatch": [{"a": [1]}, {"a": 1}, {}]},
+
+  {"name": "$all with one value matches a scalar",
+   "filter": {"a": {"$all": [1]}},
+   "match": [{"a": 1}, {"a": [1]}],
+   "nomatch": [{"a": 2}]},
+
+  {"name": "$all with a nested array value",
+   "filter": {"a": {"$all": [[1, 2]]}},
+   "match": [{"a": [1, 2]}, {"a": [[1, 2], 3]}],
+   "nomatch": [{"a": [2, 1]}]},
+
+  {"name": "$all with an empty list matches nothing",
+   "filter": {"a": {"$all": []}},
+   "nomatch": [{"a": []}, {"a": [1]}]},
+
+  {"name": "$all of $elemMatch conditions",
+   "filter": {"a": {"$all": [{"$elemMatch": {"x": 1}}, {"$elemMatch": {"y": 2}}]}},
+   "match": [{"a": [{"x": 1}, {"y": 2}]}, {"a": [{"x": 1, "y": 2}]}],
+   "nomatch": [{"a": [{"x": 1}]}, {"a": {"x": 1, "y": 2}}]},
+
+  {"name": "$all with a regex",
+   "filter": {"a": {"$all": [{"$regularExpression": {"pattern": "^a", "options": ""}}, "bb"]}},
+   "match": [{"a": ["ax", "bb"]}],
+   "nomatch": [{"a": ["bb"]}]},
+
+  {"name": "$all needs an array", "filter": {"a": {"$all": 5}}, "error": "ERR $all needs an array"},
+  {"name": "$all refuses operators", "filter": {"a": {"$all": [{"$gt": 1}]}}, "error": "ERR no $ expressions in $all"},
+
+  {"name": "$elemMatch object form needs one element to satisfy everything",
+   "filter": {"a": {"$elemMatch": {"b": 1, "c": {"$gt": 2}}}},
+   "match": [{"a": [{"b": 1, "c": 3}]}, {"a": [{"b": 2}, {"b": 1, "c": 5}]}],
+   "nomatch": [{"a": [{"b": 1, "c": 1}, {"b": 2, "c": 5}]}, {"a": {"b": 1, "c": 3}}, {"a": [1, 2]}]},
+
+  {"name": "dotted paths may be satisfied by different elements",
+   "filter": {"a.b": 1, "a.c": {"$gt": 2}},
+   "match": [{"a": [{"b": 1, "c": 1}, {"b": 2, "c": 5}]}, {"a": [{"b": 1, "c": 3}]}],
+   "nomatch": [{"a": [{"b": 2, "c": 5}]}]},
+
+  {"name": "$elemMatch reads array elements as documents",
+   "filter": {"a": {"$elemMatch": {"0": 1}}},
+   "match": [{"a": [[1, 2]]}, {"a": [{"0": 1}]}],
+   "nomatch": [{"a": [[2, 1]]}, {"a": [1]}]},
+
+  {"name": "$elemMatch value form with $in",
+   "filter": {"a": {"$elemMatch": {"$in": [5, 6]}}},
+   "match": [{"a": [1, 6]}],
+   "nomatch": [{"a": 5}, {"a": [1, 2]}]},
+
+  {"name": "$elemMatch on a nested path",
+   "filter": {"a.b": {"$elemMatch": {"$gte": 10}}},
+   "match": [{"a": [{"b": [1, 20]}]}, {"a": {"b": [10]}}],
+   "nomatch": [{"a": [{"b": 10}]}]},
+
+  {"name": "$elemMatch value form with $ne",
+   "filter": {"a": {"$elemMatch": {"$ne": 1}}},
+   "match": [{"a": [1, 2]}],
+   "nomatch": [{"a": [1, 1]}, {"a": []}]},
+
+  {"name": "$elemMatch value form with a nested $elemMatch",
+   "filter": {"a": {"$elemMatch": {"$elemMatch": {"$gt": 5}}}},
+   "match": [{"a": [[1], [9]]}],
+   "nomatch": [{"a": [9]}, {"a": [[1]]}]},
+
+  {"name": "empty $elemMatch matches arrays with a document element",
+   "filter": {"a": {"$elemMatch": {}}},
+   "match": [{"a": [{}]}, {"a": [1, {"x": 1}]}],
+   "nomatch": [{"a": [1, 2]}, {"a": []}]},
+
+  {"name": "$elemMatch with $or inside",
+   "filter": {"a": {"$elemMatch": {"$or": [{"x": 1}, {"y": 1}]}}},
+   "match": [{"a": [{"y": 1}]}],
+   "nomatch": [{"a": [{"z": 1}]}]},
+
+  {"name": "$elemMatch needs a document", "filter": {"a": {"$elemMatch": 5}}, "error": "ERR $elemMatch needs an Object"},
+
+  {"name": "positional path into an array",
+   "filter": {"a.0": 1},
+   "match": [{"a": [1, 2]}, {"a": [[1], 2]}],
+   "nomatch": [{"a": [2, 1]}, {"a": []}]},
+
+  {"name": "positional path then a field",
+   "filter": {"a.1.b": 2},
+   "match": [{"a": [{"b": 1}, {"b": 2}]}],
+   "nomatch": [{"a": [{"b": 2}, {"b": 1}]}]},
+
+  {"name": "positional path does not report other elements as missing",
+   "filter": {"a.0.b": null},
+   "match": [{"a": [{"c": 1}]}, {"a": []}],
+   "nomatch": [{"a": [{"b": 1}, {"c": 2}]}]},
+
+  {"name": "a numeric component also names a document field",
+   "filter": {"a.0": 5},
+   "match": [{"a": {"0": 5}}, {"a": [{"0": 5}]}],
+   "nomatch": [{"a": {"1": 5}}]},
+
+  {"name": "a positional path past the end is missing",
+   "filter": {"a.3": {"$exists": false}},
+   "match": [{"a": [1]}, {}],
+   "nomatch": [{"a": [1, 2, 3, 4]}]},
+
+  {"name": "$exists on an array index",
+   "filter": {"a.1": {"$exists": true}},
+   "match": [{"a": [1, 2]}],
+   "nomatch": [{"a": [1]}]},
+
+  {"name": "dotted paths do not enter arrays of arrays",
+   "filter": {"a.b": 1},
+   "nomatch": [{"a": [[{"b": 1}]]}]},
+
+  {"name": "$not $size",
+   "filter": {"a": {"$not": {"$size": 1}}},
+   "match": [{"a": [1, 2]}, {}, {"a": 1}],
+   "nomatch": [{"a": [1]}]},
+
+  {"name": "$ne on an array field needs every element to differ",
+   "filter": {"a": {"$ne": 3}},
+   "match": [{"a": [1, 2]}],
+   "nomatch": [{"a": [1, 3]}]}
+]
