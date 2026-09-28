@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -15,7 +16,7 @@ var cfs = []string{"default", "meta", "sub"}
 
 // forEach runs fn once per engine in a fresh directory.
 func forEach(t *testing.T, fn func(t *testing.T, kind Kind, dir string)) {
-	for _, k := range []Kind{LSM, BTree} {
+	for _, k := range []Kind{LSM, BTree, PgHeap} {
 		t.Run(k.String(), func(t *testing.T) { fn(t, k, t.TempDir()) })
 	}
 }
@@ -297,6 +298,69 @@ func TestOpenErrors(t *testing.T) {
 	}
 	if Version() == "" {
 		t.Fatal("empty version")
+	}
+}
+
+// TestPgHeapHotUpdatesAndVacuum checks the PostgreSQL behaviour the other
+// engines lack: updates stay HOT, a held snapshot keeps dead versions from
+// VACUUM, and VACUUM (CompactRange) removes them once it is released.
+func TestPgHeapHotUpdatesAndVacuum(t *testing.T) {
+	db, err := Open(PgHeap, t.TempDir(), cfs, "cache_bytes=4m;autovacuum=false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	prop := func(name string) uint64 {
+		t.Helper()
+		v, ok := db.Property(0, name)
+		if !ok {
+			t.Fatalf("property %s missing", name)
+		}
+		var n uint64
+		if _, err := fmt.Sscan(v, &n); err != nil {
+			t.Fatalf("property %s = %q: %v", name, v, err)
+		}
+		return n
+	}
+	update := func(round int) {
+		write(t, db, func(b *Batch) {
+			for i := range 50 {
+				b.Put(0, key(i), []byte(fmt.Sprintf("round %03d", round)))
+			}
+		})
+	}
+	update(0)
+	snap, err := db.NewSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for r := 1; r <= 20; r++ {
+		update(r)
+	}
+	if upd, hot := prop("nil.pgheap.n-tup-upd"), prop("nil.pgheap.n-tup-hot-upd"); upd != 1000 || hot == 0 {
+		t.Fatalf("%d updates, %d HOT", upd, hot)
+	}
+	if err := db.CompactRange(0, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if dead := prop("nil.pgheap.n-dead-tup"); dead != 1000 {
+		t.Fatalf("with a snapshot held VACUUM left %d dead tuples, want 1000", dead)
+	}
+	if v, _ := mustGet(t, db, snap, 0, key(3)); v != "round 000" {
+		t.Fatalf("snapshot read %q", v)
+	}
+	snap.Release()
+	if err := db.CompactRange(0, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if dead := prop("nil.pgheap.n-dead-tup"); dead != 0 {
+		t.Fatalf("after the snapshot was released VACUUM left %d dead tuples", dead)
+	}
+	if v, _ := mustGet(t, db, nil, 0, key(3)); v != "round 020" {
+		t.Fatalf("latest read %q", v)
+	}
+	if s, ok := db.Property(0, "nil.stats"); !ok || !strings.Contains(s, "HOT") {
+		t.Fatalf("nil.stats = %q", s)
 	}
 }
 

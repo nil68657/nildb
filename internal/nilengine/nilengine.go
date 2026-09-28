@@ -23,19 +23,22 @@ var libStamp string
 // Kind selects an engine at Open.
 type Kind int
 
-// The two engines.
+// The three engines.
 const (
-	LSM   Kind = C.NIL_ENGINE_LSM
-	BTree Kind = C.NIL_ENGINE_BTREE
+	LSM    Kind = C.NIL_ENGINE_LSM
+	BTree  Kind = C.NIL_ENGINE_BTREE
+	PgHeap Kind = C.NIL_ENGINE_PGHEAP
 )
 
-// String returns "lsm" or "btree".
+// String returns "lsm", "btree" or "pgheap".
 func (k Kind) String() string {
 	switch k {
 	case LSM:
 		return "lsm"
 	case BTree:
 		return "btree"
+	case PgHeap:
+		return "pgheap"
 	}
 	return "unknown"
 }
@@ -350,8 +353,8 @@ func (s *Snapshot) handle() *C.nil_snapshot {
 	return s.c
 }
 
-// Seq returns the snapshot's sequence number (LSM) or transaction id (B+
-// tree).
+// Seq returns the snapshot's sequence number (LSM), transaction id (B+
+// tree) or last committed xid (pgheap).
 func (s *Snapshot) Seq() uint64 { return s.seq }
 
 // Release frees the snapshot. Iterators opened on it keep working.
@@ -471,7 +474,8 @@ func (db *DB) Flush() error {
 	})
 }
 
-// FlushWAL syncs the log (LSM) or data file (B+ tree) when sync is true.
+// FlushWAL syncs the log (LSM, pgheap) or data file (B+ tree) when sync is
+// true.
 func (db *DB) FlushWAL(sync bool) error {
 	cs := C.int(0)
 	if sync {
@@ -484,7 +488,8 @@ func (db *DB) FlushWAL(sync bool) error {
 	})
 }
 
-// CompactRange compacts [lo, hi) of cf; a nil or empty bound is open.
+// CompactRange compacts [lo, hi) of cf; a nil or empty bound is open. On
+// pgheap it runs VACUUM on the whole column family.
 func (db *DB) CompactRange(cf int, lo, hi []byte) error {
 	return db.with(func(c *C.nil_db) error {
 		l, ll := cbytes(lo)
@@ -510,8 +515,8 @@ func (db *DB) Property(cf int, name string) (val string, ok bool) {
 	return val, ok
 }
 
-// LatestSeq returns the sequence number (LSM) or transaction id (B+ tree)
-// of the last commit.
+// LatestSeq returns the sequence number (LSM), transaction id (B+ tree) or
+// xid (pgheap) of the last commit.
 func (db *DB) LatestSeq() uint64 {
 	var s uint64
 	_ = db.with(func(c *C.nil_db) error {
