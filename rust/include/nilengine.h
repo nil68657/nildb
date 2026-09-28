@@ -1,6 +1,7 @@
 /*
- * nilengine.h: C interface to NilDB's storage engines, an LSM tree and a
- * copy-on-write B+ tree written in Rust (rust/capi builds libnilengine.a).
+ * nilengine.h: C interface to NilDB's storage engines, an LSM tree, a
+ * copy-on-write B+ tree and a PostgreSQL-style heap (pgheap) written in Rust
+ * (rust/capi builds libnilengine.a).
  * docs/design/rust-engines.md describes the engines and their formats.
  *
  * Conventions
@@ -43,6 +44,7 @@ typedef struct nil_iter nil_iter;
 /* Engine kinds for nil_open. */
 #define NIL_ENGINE_LSM 1
 #define NIL_ENGINE_BTREE 2
+#define NIL_ENGINE_PGHEAP 3
 
 /* Library version, a static NUL-terminated string. */
 const char *nil_version(void);
@@ -60,8 +62,11 @@ void nil_free(void *p);
  * block_size, block_restart_interval, bloom_bits_per_key, target_file_size,
  * level0_compaction_trigger, level0_stop_writes_trigger,
  * max_bytes_for_level_base, level_size_multiplier, num_levels (LSM);
- * page_size, max_unsynced_free_pages (B+ tree). Returns NULL on failure;
- * another open of the same directory fails with "busy".
+ * page_size, max_unsynced_free_pages (B+ tree); fillfactor,
+ * checkpoint_wal_bytes, autovacuum, autovacuum_threshold,
+ * autovacuum_scale_percent, autovacuum_naptime_ms (pgheap). cache_bytes
+ * sizes the block cache, the page cache or pgheap's buffer pool. Returns
+ * NULL on failure; another open of the same directory fails with "busy".
  */
 nil_db *nil_open(int engine, const char *dir, const char *const *cf_names, size_t num_cfs,
                  const char *options, char **errptr);
@@ -73,7 +78,7 @@ nil_db *nil_open(int engine, const char *dir, const char *const *cf_names, size_
  */
 void nil_close(nil_db *db, char **errptr);
 
-/* NIL_ENGINE_LSM or NIL_ENGINE_BTREE; 0 for a NULL handle. */
+/* NIL_ENGINE_LSM, NIL_ENGINE_BTREE or NIL_ENGINE_PGHEAP; 0 for a NULL handle. */
 int nil_engine_kind(const nil_db *db);
 
 /* Longest key the engine accepts (the B+ tree limit depends on its page size). */
@@ -122,9 +127,11 @@ void nil_multi_get(nil_db *db, const nil_snapshot *snap, uint32_t cf, size_t n, 
                    const size_t *klens, char **vals, size_t *vlens, char **errptr);
 
 /*
- * Snapshots pin the state at creation. The sequence number (LSM) or
- * transaction id (B+ tree) grows with every commit. A released snapshot
- * stays readable through iterators opened on it.
+ * Snapshots pin the state at creation. The sequence number (LSM),
+ * transaction id (B+ tree) or last committed xid (pgheap) grows with every
+ * commit. A released snapshot stays readable through iterators opened on
+ * it. On pgheap an open snapshot also keeps VACUUM from removing the
+ * versions it can see.
  */
 nil_snapshot *nil_snapshot_new(nil_db *db, char **errptr);
 uint64_t nil_snapshot_seq(const nil_snapshot *s);
@@ -163,17 +170,18 @@ void nil_iter_destroy(nil_iter *it);
 
 /*
  * Makes every write committed before the call durable. The LSM writes its
- * memtables to table files; the B+ tree syncs its data file.
+ * memtables to table files; the B+ tree syncs its data file; pgheap runs a
+ * checkpoint.
  */
 void nil_flush(nil_db *db, char **errptr);
 
-/* Syncs the log (LSM) or the data file (B+ tree) when sync != 0. */
+/* Syncs the log (LSM, pgheap) or the data file (B+ tree) when sync != 0. */
 void nil_flush_wal(nil_db *db, int sync, char **errptr);
 
 /*
  * Compacts [start, end) of cf (NULL is an open end) down to the bottom LSM
- * level, dropping deleted data no snapshot can see. The B+ tree returns at
- * once.
+ * level, dropping deleted data no snapshot can see. pgheap runs VACUUM on
+ * the whole column family. The B+ tree returns at once.
  */
 void nil_compact_range(nil_db *db, uint32_t cf, const char *start, size_t slen, const char *end, size_t elen,
                        char **errptr);
@@ -186,11 +194,15 @@ void nil_compact_range(nil_db *db, uint32_t cf, const char *start, size_t slen, 
  * rocksdb.estimate-pending-compaction-bytes, rocksdb.block-cache-usage,
  * rocksdb.stats); engine-specific ones start with "nil." (nil.stats,
  * nil.latest-sequence, nil.num-range-tombstones, nil.btree.depth,
- * nil.btree.num-pages, nil.btree.free-pages, ...).
+ * nil.btree.num-pages, nil.btree.free-pages, nil.pgheap.n-dead-tup,
+ * nil.pgheap.n-tup-hot-upd, ...).
  */
 char *nil_property(nil_db *db, uint32_t cf, const char *name);
 
-/* Sequence number (LSM) or transaction id (B+ tree) of the last commit. */
+/*
+ * Sequence number (LSM), transaction id (B+ tree) or xid (pgheap) of the
+ * last commit.
+ */
 uint64_t nil_latest_sequence(nil_db *db);
 
 #ifdef __cplusplus

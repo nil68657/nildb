@@ -1,4 +1,5 @@
-//! C interface to NilDB's storage engines; `rust/include/nilengine.h`
+//! C interface to NilDB's storage engines (LSM, B+ tree and pgheap);
+//! `rust/include/nilengine.h`
 //! declares every function here and documents the conventions:
 //!
 //! - `nil_db`, `nil_batch`, `nil_snapshot` and `nil_iter` are opaque handles
@@ -31,6 +32,7 @@ unsafe extern "C" {
 
 pub const NIL_ENGINE_LSM: c_int = 1;
 pub const NIL_ENGINE_BTREE: c_int = 2;
+pub const NIL_ENGINE_PGHEAP: c_int = 3;
 
 pub struct nil_db {
     engine: Box<dyn Engine>,
@@ -64,6 +66,7 @@ pub fn open_engine(
     match kind {
         EngineKind::Lsm => nilengine_lsm::open_boxed(dir, cfs, opts),
         EngineKind::BTree => nilengine_btree::open_boxed(dir, cfs, opts),
+        EngineKind::PgHeap => nilengine_pgheap::open_boxed(dir, cfs, opts),
     }
 }
 
@@ -209,6 +212,7 @@ pub unsafe extern "C" fn nil_open(
         let kind = match engine {
             NIL_ENGINE_LSM => EngineKind::Lsm,
             NIL_ENGINE_BTREE => EngineKind::BTree,
+            NIL_ENGINE_PGHEAP => EngineKind::PgHeap,
             k => return Err(Error::invalid(format!("unknown engine kind {k}"))),
         };
         let dir = unsafe { cstr(dir, "dir") }?;
@@ -245,6 +249,7 @@ pub unsafe extern "C" fn nil_engine_kind(db: *const nil_db) -> c_int {
         match unsafe { db.as_ref() }.map(|d| d.engine.kind()) {
             Some(EngineKind::Lsm) => NIL_ENGINE_LSM,
             Some(EngineKind::BTree) => NIL_ENGINE_BTREE,
+            Some(EngineKind::PgHeap) => NIL_ENGINE_PGHEAP,
             None => 0,
         }
     })
@@ -948,6 +953,11 @@ mod tests {
     #[test]
     fn btree_round_trip() {
         round_trip(NIL_ENGINE_BTREE, "btree");
+    }
+
+    #[test]
+    fn pgheap_round_trip() {
+        round_trip(NIL_ENGINE_PGHEAP, "pgheap");
     }
 
     #[test]
