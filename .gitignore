@@ -6,3 +6,4 @@ data/
 .DS_Store
 /tmp/
 .claude/
+rust/target/

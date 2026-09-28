@@ -1,0 +1,10 @@
+[package]
+name = "nilengine-api"
+description = "The storage engine trait NilDB's LSM and B+ tree engines implement, plus shared encodings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast.workspace = true

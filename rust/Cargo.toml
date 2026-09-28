@@ -1,0 +1,31 @@
+# NilDB storage engines: an LSM tree and a copy-on-write B+ tree behind one
+# trait, a C interface for the Go server, a conformance suite and a benchmark.
+# Design and on-disk formats: docs/design/rust-engines.md.
+[workspace]
+resolver = "3"
+members = ["api", "conformance", "lsm", "btree", "capi", "bench"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+crc32fast = "1.4"
+nilengine-api = { path = "api" }
+nilengine-conformance = { path = "conformance" }
+nilengine-lsm = { path = "lsm" }
+nilengine-btree = { path = "btree" }
+
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 4
+
+# The conformance suite runs thousands of randomized operations; unoptimized
+# builds make it slow for no benefit.
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1

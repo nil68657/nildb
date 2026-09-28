@@ -1,0 +1,16 @@
+[package]
+name = "nilengine-bench"
+description = "Throughput benchmark for NilDB's LSM and B+ tree engines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nilbench"
+path = "src/main.rs"
+
+[dependencies]
+nilengine-api.workspace = true
+nilengine-lsm.workspace = true
+nilengine-btree.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "nilengine-conformance"
+description = "Conformance suite every NilDB storage engine must pass"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nilengine-api.workspace = true

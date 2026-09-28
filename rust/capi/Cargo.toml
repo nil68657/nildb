@@ -1,0 +1,16 @@
+[package]
+name = "nilengine-capi"
+description = "C interface to NilDB's storage engines, built as libnilengine.a"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nilengine"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+nilengine-api.workspace = true
+nilengine-lsm.workspace = true
+nilengine-btree.workspace = true
