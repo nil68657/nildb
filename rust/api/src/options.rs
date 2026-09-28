@@ -7,7 +7,8 @@ use crate::error::{Error, Result};
 pub struct Options {
     /// Both: create the database and missing column families.
     pub create_if_missing: bool,
-    /// Both: bytes of the block cache (LSM) or page cache (B+ tree).
+    /// All: bytes of the block cache (LSM), page cache (B+ tree) or buffer
+    /// pool (pgheap).
     pub cache_bytes: usize,
     /// LSM: memtable size that triggers a switch to a new memtable and log.
     pub write_buffer_size: usize,
@@ -37,6 +38,21 @@ pub struct Options {
     /// B+ tree: pages freed by unsynced commits before the engine syncs on
     /// its own so they can be reused.
     pub max_unsynced_free_pages: usize,
+    /// pgheap: percent of a heap page that inserts may fill; the rest is kept
+    /// for updates on the same page (HOT).
+    pub fillfactor: usize,
+    /// pgheap: WAL bytes written since the last checkpoint that trigger the
+    /// next one (PostgreSQL's max_wal_size, simplified; its default is
+    /// 1 GiB, this one 256 MiB, which bounds crash recovery to seconds).
+    pub checkpoint_wal_bytes: u64,
+    /// pgheap: run the autovacuum thread.
+    pub autovacuum: bool,
+    /// pgheap: autovacuum vacuums a column family once its dead tuples pass
+    /// `autovacuum_threshold + autovacuum_scale_percent% * live tuples`.
+    pub autovacuum_threshold: u64,
+    pub autovacuum_scale_percent: u64,
+    /// pgheap: pause between autovacuum rounds.
+    pub autovacuum_naptime_ms: u64,
     /// Tests only: record unsynced writes so `Engine::crash` can drop them.
     pub track_unsynced_writes: bool,
 }
@@ -59,6 +75,12 @@ impl Default for Options {
             num_levels: 7,
             page_size: 4096,
             max_unsynced_free_pages: 16384,
+            fillfactor: 90,
+            checkpoint_wal_bytes: 256 << 20,
+            autovacuum: true,
+            autovacuum_threshold: 50,
+            autovacuum_scale_percent: 20,
+            autovacuum_naptime_ms: 1000,
             track_unsynced_writes: false,
         }
     }
@@ -79,6 +101,8 @@ impl Options {
             level_size_multiplier: 4,
             num_levels: 5,
             max_unsynced_free_pages: 512,
+            checkpoint_wal_bytes: 1 << 20,
+            autovacuum_naptime_ms: 50,
             ..Options::default()
         }
     }
@@ -133,6 +157,12 @@ impl Options {
                 self.page_size = p as usize;
             }
             "max_unsynced_free_pages" => self.max_unsynced_free_pages = size()?.max(1) as usize,
+            "fillfactor" => self.fillfactor = size()?.clamp(10, 100) as usize,
+            "checkpoint_wal_bytes" => self.checkpoint_wal_bytes = size()?.max(64 << 10),
+            "autovacuum" => self.autovacuum = parse_bool(name, value)?,
+            "autovacuum_threshold" => self.autovacuum_threshold = size()?,
+            "autovacuum_scale_percent" => self.autovacuum_scale_percent = size()?,
+            "autovacuum_naptime_ms" => self.autovacuum_naptime_ms = size()?.max(1),
             "track_unsynced_writes" => self.track_unsynced_writes = parse_bool(name, value)?,
             _ => return Err(Error::invalid(format!("unknown option {name:?}"))),
         }

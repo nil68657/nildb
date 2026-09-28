@@ -16,6 +16,7 @@ use crate::options::{IterOptions, WriteOptions};
 pub enum EngineKind {
     Lsm,
     BTree,
+    PgHeap,
 }
 
 impl EngineKind {
@@ -23,6 +24,7 @@ impl EngineKind {
         match self {
             EngineKind::Lsm => "lsm",
             EngineKind::BTree => "btree",
+            EngineKind::PgHeap => "pgheap",
         }
     }
 
@@ -30,16 +32,17 @@ impl EngineKind {
         match s {
             "lsm" => Some(EngineKind::Lsm),
             "btree" | "bptree" | "b+tree" => Some(EngineKind::BTree),
+            "pgheap" => Some(EngineKind::PgHeap),
             _ => None,
         }
     }
 }
 
-/// A consistent read view. `seq` is a sequence number in the LSM engine and a
-/// transaction id in the B+ tree engine; either way every write committed at
-/// or before `seq` is visible and nothing later is. Clones share one view,
-/// and the view is released when the last clone and every iterator opened on
-/// it are dropped.
+/// A consistent read view. `seq` is a sequence number in the LSM engine, a
+/// transaction id in the B+ tree engine and the last committed xid in
+/// pgheap; either way every write committed at or before `seq` is visible
+/// and nothing later is. Clones share one view, and the view is released
+/// when the last clone and every iterator opened on it are dropped.
 #[derive(Clone)]
 pub struct Snapshot {
     seq: u64,
@@ -161,7 +164,8 @@ pub trait Engine: Send + Sync {
     /// Reorganizes the key range `[start, end)` of `cf` (`None` is open). The
     /// LSM engine compacts every file that overlaps the range down to the
     /// bottom level, which discards deleted and overwritten data no snapshot
-    /// can see. The B+ tree has nothing to reclaim and returns at once.
+    /// can see. pgheap runs VACUUM on the whole column family. The B+ tree
+    /// has nothing to reclaim and returns at once.
     fn compact_range(&self, cf: CfId, start: Option<&[u8]>, end: Option<&[u8]>) -> Result<()>;
 
     /// Reads a named property. Names follow RocksDB where the meaning
@@ -169,7 +173,8 @@ pub trait Engine: Send + Sync {
     /// rest start with `nil.`. Unknown names return `None`.
     fn property(&self, cf: CfId, name: &str) -> Option<String>;
 
-    /// Sequence number (LSM) or transaction id (B+ tree) of the last commit.
+    /// Sequence number (LSM), transaction id (B+ tree) or xid (pgheap) of the
+    /// last commit.
     fn latest_sequence(&self) -> u64;
 
     /// Syncs, stops background work and releases the directory lock. Later

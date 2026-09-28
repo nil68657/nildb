@@ -1,19 +1,20 @@
 # NilDB storage engines in Rust
 
-Status: phase 1 done on 2026-09-27. Two engines, an LSM tree and a copy-on-write B+ tree, pass one conformance suite, are callable from C and from Go, and have a first benchmark against RocksDB 11.8.1. Nothing in the server uses them yet; phase 2 puts them behind `internal/store` (last section).
+Status: phase 1 done on 2026-09-27. Two engines, an LSM tree and a copy-on-write B+ tree, pass one conformance suite, are callable from C and from Go, and have a first benchmark against RocksDB 11.8.1. A third engine, pgheap, modelled on PostgreSQL's heap storage, was added on 2026-09-28 and passes the same suite (section "pgheap engine"). Nothing in the server uses them yet; phase 2 puts them behind `internal/store` (last section).
 
 Everything lives in `rust/` (a cargo workspace), `rust/include/nilengine.h` and `internal/nilengine`.
 
 | Crate | Directory | Contents |
 |---|---|---|
 | `nilengine-api` | `rust/api` | `Engine` trait, `WriteBatch`, options, errors, varints, CRC-32, a sharded LRU cache |
-| `nilengine-conformance` | `rust/conformance` | the suite both engines run, a `BTreeMap` model, seeded workloads |
+| `nilengine-conformance` | `rust/conformance` | the suite every engine runs, a `BTreeMap` model, seeded workloads |
 | `nilengine-lsm` | `rust/lsm` | LSM engine |
 | `nilengine-btree` | `rust/btree` | B+ tree engine |
+| `nilengine-pgheap` | `rust/pgheap` | PostgreSQL-style heap engine: MVCC heap, B-tree index, WAL, VACUUM |
 | `nilengine-capi` | `rust/capi` | C interface, built as `rust/target/release/libnilengine.a` |
 | `nilengine-bench` | `rust/bench` | `nilbench`, the Rust-side benchmark |
 
-The only third-party crate is `crc32fast` (plus its `cfg-if`). Tests use their own temp-dir helper and a SplitMix64 generator, so neither `tempfile` nor `rand` is needed. `Cargo.lock` is committed.
+The only third-party crate is `crc32fast` (plus its `cfg-if`); pgheap added none. Tests use their own temp-dir helper and a SplitMix64 generator, so neither `tempfile` nor `rand` is needed. `Cargo.lock` is committed.
 
 ## Engine API
 
@@ -105,11 +106,146 @@ One file, `data.nbt`, of fixed-size pages (4 KiB default, chosen when the file i
 
 Limits: keys up to 981 bytes with 4 KiB pages (85 with 512-byte pages); values up to 1 GiB; one writer; the file never shrinks; open walks the whole file; at most as many column families as fit in one meta page (122 with 8-byte names at 4 KiB).
 
+## pgheap engine
+
+Design sources: PostgreSQL's documentation (storage-page-layout.html, mvcc.html, routine-vacuuming.html) and source tree (`src/backend/access/heap/README.HOT`, `src/backend/access/nbtree/README`, `src/backend/access/transam/README`, `src/include/access/heaptoast.h` for the TOAST constants, `src/backend/postmaster/walwriter.c` for the WAL writer's delay). PostgreSQL is under the PostgreSQL License; pgheap copies none of its code.
+
+pgheap stores each column family the way PostgreSQL stores a table with one index: a heap of 8 KiB pages holding every version of every key, a B-tree from key to heap tuple, and a TOAST heap with its own index for values too large to keep inline. An update writes a new version; a reader picks the version its snapshot sees from the versions' xmin and xmax and the commit log; pruning and VACUUM remove versions no snapshot can see.
+
+### Files
+
+| File | Contents |
+|---|---|
+| `pg_control` | two 512-byte slots, each: magic `NILPGCTL`, version u32, sequence u64, state u8 (1 shut down, 2 running), checkpoint LSN, redo LSN, next xid, last committed xid (u64 each), CRC-32. A write goes to the slot the last write did not use and is synced; open takes the valid slot with the higher sequence. |
+| `catalog` | column family names in creation order, CRC-32 at the end, replaced by write, sync, rename, directory sync. Family n owns relations 16 + 4n (heap), 17 + 4n (index), 18 + 4n (TOAST heap) and 19 + 4n (TOAST index). |
+| `base/<rel>`, `base/<rel>_fsm`, `base/<rel>_vm` | a relation's pages, its free-space map and its visibility map (PostgreSQL's forks) |
+| `pg_xact/0000` | the commit log, relation 1 |
+| `pg_wal/<16 hex digits>` | WAL segments of 16 MiB, named by segment number |
+| `pg_stat` | counters saved at a clean close; open reads and deletes it, so a crash starts the counters over, as PostgreSQL's statistics do |
+| `LOCK` | an `flock`ed file that stops a second open |
+
+### Page, tuple and index layouts
+
+All integers are little-endian unless marked big-endian.
+
+| Structure | Layout |
+|---|---|
+| page header, 32 bytes | page LSN u64, checksum u32 (CRC-32 of the page with this field zeroed, seeded with the block number), flags u16, pd_lower u16, pd_upper u16, pd_special u16, page kind u8, layout version u8, unused u16, pd_prune_xid u64. PostgreSQL's header is 24 bytes; pd_prune_xid needs 8 bytes here because xids are 64-bit. |
+| line pointer, 4 bytes | PostgreSQL's ItemIdData: lp_off in bits 0-14, lp_flags in bits 15-16 (0 unused, 1 normal, 2 redirect, 3 dead), lp_len in bits 17-31. Line pointers grow forward from the header, tuples backward from pd_special. At most 226 per heap page. |
+| heap tuple, 32-byte header | xmin u64, xmax u64, t_ctid (block u32, offset u16), t_infomask2 u16 (0x4000 HEAP_HOT_UPDATED, 0x8000 HEAP_ONLY_TUPLE), t_infomask u16 (0x0004 HEAP_HASEXTERNAL, 0x0100 XMIN_COMMITTED, 0x0200 XMIN_INVALID, 0x0400 XMAX_COMMITTED, 0x0800 XMAX_INVALID, 0x2000 HEAP_UPDATED), key length u16, value length u32, then the key and the value |
+| TOAST pointer, 16 bytes | value id u64, value length u32, chunk count u32 |
+| TOAST chunk tuple | a heap tuple whose key is the value id (u64 big-endian) and chunk number (u32 big-endian) and whose value is up to 1992 bytes |
+| B-tree page | slotted page with 16 bytes of special space: left sibling u32, right sibling u32, level u32 (0 for leaves), flags u16, unused u16. Item 1 of a page with a right sibling is its high key. |
+| B-tree items | leaf: tid block u32, tid offset u16, key length u16, key; internal: child block u32, then the separator in leaf format. The first data item of an internal page counts as minus infinity. |
+| B-tree meta page (block 0) | magic `NBTR` u32, version u32, root block u32, root level u32 |
+| commit-log page | two bits per xid (0 in progress, 1 committed, 2 aborted) after the header: 32,640 xids per page |
+| free-space map page | one byte per heap page, its free space in 32-byte steps: 8,160 heap pages per map page |
+| visibility-map page | one bit per heap page, set when every tuple on it is visible to every snapshot: 65,280 heap pages per map page |
+
+### Transactions, the commit log and snapshots
+
+Each write batch is one transaction. Its xid is assigned at its first change, so a batch that changes nothing commits nothing; `latest_sequence` and snapshot sequence numbers report the last committed xid. Xids are 64-bit counters that start at 3 and are never reused, so they never wrap around and tuples never need freezing. The cost is that the commit log is never truncated: two bits per xid is 256 MB per billion transactions. PostgreSQL truncates its log below the oldest unfrozen xid; doing that here would need a freeze horizon first.
+
+One engine-level writer lock runs batches one at a time, so at most one xid is ever in progress. NilDB's server already locks the keys each command touches, so the lock gives up little parallelism the server was using. Readers never take it.
+
+A commit sets the transaction's commit-log bits under the page's exclusive lock, logs a commit record for that page, hands the WAL to the operating system (or syncs it for a synced write), and only then removes the xid from the running set. A snapshot records the next xid (`xmax`), the running xid if any, and the oldest xid it needs (`xmin`). It sees a version when:
+
+- the version's xmin committed, is below the snapshot's `xmax`, and was not the running xid when the snapshot was taken; and
+- its xmax is unset, aborted, was the running xid at snapshot time, or is at or above the snapshot's `xmax`.
+
+The writer sees committed versions plus its own changes. An xid below `xmax` that the commit log still marks in progress belonged to a transaction that crashed, and counts as aborted.
+
+Readers set hint bits (XMIN_COMMITTED, XMIN_INVALID, XMAX_COMMITTED, XMAX_INVALID) after a commit-log lookup, but only when the page's exclusive lock is free at that moment, since hints are optional. A committed hint is set only once the transaction's commit record is flushed, the rule PostgreSQL's SetHintBits follows: an unsynced commit can be lost in a crash while the hinted page survives. A page that gains hints without having been logged since the last checkpoint's redo pointer first logs a full-page image (PostgreSQL's XLogSaveBufferForHint, which runs when data checksums are on), because a torn write of that page would otherwise fail its checksum with nothing to repair it.
+
+Every snapshot registers its xmin, including the one `get` takes for a single call and the one an iterator holds until it is dropped. The oldest registered xmin is the horizon: a version whose deleting transaction committed below it is dead to every snapshot.
+
+### B-tree index
+
+The index follows nbtree's Lehman and Yao design. Entries are (key, tid) pairs sorted by key and then tid, so every entry is unique, and a key can have one entry per HOT chain. A reader holds one page lock at a time and moves right when its search key is at or above a page's high key, which gets it past a split that happened after it read the parent. A backward scan follows the left link, then moves right until it reaches the page whose right link is the page it came from. A split that appends to the rightmost page leaves the left page 90% full, as PostgreSQL does; any other split balances the bytes. A split, the downlink it adds to the parent and any new root are logged as one record of full page images, so recovery never sees half a split; PostgreSQL logs the split and the parent insert separately and finishes an incomplete split later. Pages are never merged or deleted. Keys may be up to 2,000 bytes, so four entries always fit on a page.
+
+### Writes, HOT and pruning
+
+An insert goes to the relation's current target page if the tuple fits with (100 − fillfactor)% of the page still free, then to a page the free-space map offers, then to a new page at the end. An update puts the new version on the old version's page when it fits, ignoring fillfactor: the new tuple becomes a heap-only tuple, the old one gets HEAP_HOT_UPDATED and a t_ctid pointing at it, and the index gets no new entry. An update that does not fit goes to another page and adds an index entry. A delete sets xmax.
+
+NilDB's default fillfactor is 90; PostgreSQL's heap default is 100. NilDB's Redis workloads overwrite values in place (SET on an existing key, HSET, INCR through `i64add`), and the 10% left free on each page is where their HOT versions go.
+
+When the writer wants a page that is short of space and the page's pd_prune_xid is older than the horizon, it prunes the page first, following `heap_page_prune`: the dead members of each HOT chain become unused line pointers, the chain's root becomes a redirect to its first surviving member (or a dead line pointer when nothing survives), and a dead heap-only tuple that no chain reaches any more, such as the new version of an aborted update, becomes unused. The index entry keeps pointing at the root. A reader walks from the root through the redirect and the t_ctid links, checking that each member's xmin equals the previous member's xmax, which rejects a line pointer that was reused.
+
+Delete-range sets xmax on every live version in the range: PostgreSQL has no range tombstone, so it costs O(keys in range), where the LSM writes one tombstone. A merge (`i64add`) reads the live version and writes an update. A batch whose merge fails is aborted: an abort record marks its xid, and its tuples stay behind, dead, until pruning or VACUUM takes them.
+
+### TOAST
+
+A tuple longer than 2,032 bytes (PostgreSQL's TOAST_TUPLE_THRESHOLD, sized for four tuples per 8 KiB page) moves its value to the column family's TOAST heap in chunks of 1,992 bytes, four chunk tuples per page. PostgreSQL's chunk is 1,996 bytes because its tuple header is smaller. The value id is the xid shifted left 24 bits plus the value's number within the batch, so ids are unique forever. The heap tuple keeps a 16-byte pointer. Updating or deleting the version marks its chunks deleted with the same xid, as `toast_delete_datum` does, and VACUUM of the TOAST heap removes them. Readers fetch chunks without a visibility check (PostgreSQL's SnapshotToast), since a chunk can only die after every snapshot has stopped seeing the version that points at it. Values may be up to 1 GiB. Compression is deferred: PostgreSQL compresses a value with pglz or lz4 before moving it out of line, and pgheap stores it as is.
+
+### WAL, checkpoints and recovery
+
+The WAL is one byte stream addressed by LSN and cut into 16 MiB segments; a record may span two segments. A record is a 32-byte header (total length u32, CRC-32 u32, previous record's LSN u64, xid u64, type u8, info u8, block count u8, unused u8, main-data length u32), a 12-byte reference per page it changes (relation u32, fork u8, flags u8, block u32, unused u16), each followed by a full-page image when flag 1 is set (hole offset u16, hole length u16, the page without the hole between pd_lower and pd_upper), then the main data. Replay stops at the first record that is short, fails its CRC or does not link back to the record before it.
+
+| Record | Pages | Main data |
+|---|---|---|
+| checkpoint | none | redo LSN, next xid, last committed xid, shutdown flag |
+| full-page image for hints | the page (always an image) | none |
+| commit, abort | the commit-log page | none; the xid is in the header |
+| heap insert | heap page | offset u16, flags u8, tuple |
+| heap delete | heap page | offset u16, xmax u64 |
+| heap update | new page, old page (one page when both are the same) | old offset u16, new offset u16, xmax u64, new tuple |
+| HOT update | the page | same as heap update |
+| prune | heap page | counts of redirected, dead and unused line pointers (u16 each), new pd_prune_xid u64, then the offsets |
+| vacuum | heap page | count u16 and the offsets made unused |
+| B-tree insert | leaf | position u16, item |
+| B-tree split, B-tree new root | every page the split changed, as images | none |
+| B-tree vacuum | leaf | count u16 and the positions removed |
+
+- WAL before data: the buffer manager writes a dirty page only after the WAL is flushed up to the page's LSN.
+- Full-page images: the first change to a page after the redo pointer of the latest checkpoint logs the page's new contents; redo restores the image instead of applying the change. That is what repairs a torn page write.
+- Durability: `write` hands every commit record to the operating system before returning, so a process crash keeps it; a synced write syncs the WAL; the WAL writer thread syncs it every 200 ms (PostgreSQL's wal_writer_delay default); a power loss keeps a prefix of the commits.
+- Checkpoints: move the redo pointer to the end of the WAL, write every dirty buffer, sync the relation files that were written, log a checkpoint record and sync it, point `pg_control` at it, delete WAL segments that end before the redo pointer. Writers keep running meanwhile. The checkpointer thread starts one after `checkpoint_wal_bytes` of WAL (256 MiB; PostgreSQL's max_wal_size defaults to 1 GiB) or after 300 s with new WAL (checkpoint_timeout); `flush` runs one, and `close` runs a shutdown checkpoint.
+- Recovery: a first pass reads the WAL from the redo pointer to find where it ends and to check that the checkpoint record `pg_control` names is there; the segment holding the end is cut there and later segments are deleted, so no stale bytes can follow new records. A second pass replays each record: a page with an image is restored from it; a page without one is changed only if its LSN is below the record's end LSN. The next xid and the last committed xid advance with the replayed records, and a transaction without a commit record counts as aborted. An end-of-recovery checkpoint makes the result durable.
+- Crash tests: `crash` halts the WAL so no sync starts after the simulated power loss, stops the background threads, then drops, keeps or tears each unsynced write.
+
+### Buffer manager
+
+The pool holds `cache_bytes` / 8 KiB frames (at least 32). A 64-shard table maps (relation, fork, block) to frames; a frame has a pin count, a usage count capped at 5 for the clock sweep, a dirty flag, a content lock and an I/O lock that keeps two writers of one frame in order. Reads verify the checksum: a torn main-fork page is a corruption error, and a torn free-space or visibility-map page reads as zeros, as PostgreSQL treats those maps.
+
+### VACUUM, the free-space map, the visibility map and autovacuum
+
+`compact_range` runs VACUUM on the whole column family, heap first, then TOAST heap; like PostgreSQL's VACUUM it ignores key ranges. It makes three passes over a heap: prune every page the visibility map does not mark all-visible and collect the dead line pointers pruning leaves; remove the index entries pointing at them; mark those line pointers unused, drop trailing unused ones, record each page's free space in the free-space map and set the visibility-map bit of pages left all-visible. It holds the writer lock for at most 64 heap pages at a time and for the whole index pass. A long-held snapshot keeps VACUUM from removing any version deleted after the snapshot's xmin, which is where bloat comes from (the long-snapshot benchmark below grew the heap tenfold).
+
+The free-space map is a hint and is not logged; an insert that finds a page fuller than the map said records the real figure and looks again. The visibility map is not logged either: open empties it after a crash and the next VACUUM rebuilds it, since its bits only let VACUUM skip work. PostgreSQL logs setting and clearing visibility-map bits.
+
+The autovacuum thread wakes every `autovacuum_naptime_ms` (default 1000; PostgreSQL's autovacuum_naptime is 60 s) and vacuums each heap whose dead tuples exceed `autovacuum_threshold + autovacuum_scale_percent% × live tuples`, with PostgreSQL's defaults of 50 and 20%. Commits keep n_live_tup and n_dead_tup; pruning subtracts what it removes; VACUUM sets n_dead_tup to the dead versions it had to leave and n_live_tup to what it counted when it saw every page.
+
+### Properties
+
+`rocksdb.estimate-num-keys` is n_live_tup; `rocksdb.num-snapshots`, `rocksdb.block-cache-usage` and `rocksdb.block-cache-capacity` mean what they mean elsewhere. pgheap adds, per column family, in the style of pg_stat_user_tables: `nil.pgheap.n-live-tup`, `n-dead-tup`, `n-tup-ins`, `n-tup-upd`, `n-tup-hot-upd`, `n-tup-del`, `vacuum-count`, `autovacuum-count`, `pruned`, `heap-bytes`, `index-bytes`, `toast-bytes`, `live-bytes`, `bloat-pct` (the share of the heap not taken by live tuple bytes), `toast-n-live-tup`, `toast-n-dead-tup`, `index-entries`, `index-depth`, `all-visible-pages`, and engine-wide `wal-bytes`, `wal-disk-bytes`, `checkpoints`, `buffer-hit-ratio`, `next-xid`, `oldest-xmin`, `registered-snapshots`. `nil.stats` prints them as text.
+
+### Differences from PostgreSQL
+
+- 64-bit xids: no wraparound, no freezing, no anti-wraparound VACUUM; the commit log is never truncated.
+- One writer at a time, instead of row locks and concurrent writers.
+- Pruning runs only when a writer needs space on a page; PostgreSQL also prunes during reads.
+- A B-tree split and its parent insert are one WAL record of page images; PostgreSQL logs them separately and repairs incomplete splits. Empty index pages are never deleted.
+- The visibility map is not WAL-logged; it is emptied after a crash.
+- The WAL has no page headers and records are not 8-byte aligned; each record links to the previous one by LSN, as PostgreSQL's xl_prev does.
+- No TOAST compression; chunks are 1,992 bytes.
+- VACUUM never truncates the heap: freed pages go to the free-space map and the file does not shrink.
+- `pg_control` has two slots instead of relying on atomic 512-byte writes.
+- The free-space map is a flat array per relation, not PostgreSQL's tree of maximums.
+- Page and tuple headers are 32 bytes (24 and 23 in PostgreSQL) because of 64-bit xids.
+- The checkpointer, the WAL writer and autovacuum are the only background threads. There is no background writer, so the thread that evicts a dirty page writes it itself.
+
+### What phase 2 needs from pgheap
+
+- Delete-range is O(n). `internal/store` drops a collection or an index with one delete-range over its id prefix; on pgheap that one batch sets xmax on every row, logs a 54-byte record per row plus a full-page image of each heap page it touches first after a checkpoint, and holds the writer lock throughout. Phase 2 should split large delete-ranges into batches of a few thousand keys, run by the store's janitor, and trigger VACUUM afterwards.
+- Snapshots block VACUUM for the whole database. On the LSM an abandoned snapshot only keeps old versions through compactions; on pgheap it stops pruning and VACUUM from removing anything deleted after it, and once pages fill most updates turn non-HOT (10.5% stayed HOT in the long-snapshot benchmark). The store's snapshot registry with leases and the janitor that expires them are required, not optional, and `nil.pgheap.oldest-xmin` with `registered-snapshots` should reach `ROCKS.STATS` so an operator can see what holds the horizon.
+- The sweeper replaces RocksDB's compaction filters for every Rust engine. On pgheap each row it deletes becomes a dead tuple, so the sweeper should run VACUUM (`compact_range`) on a family after a large round instead of waiting for autovacuum's threshold.
+- `--engine pgheap`, the `ENGINE` marker and `ROCKS.*` map as for the other engines; `ROCKS.COMPACT` runs VACUUM. A checkpoint for `ROCKS.CHECKPOINT` would be a PostgreSQL base backup: a checkpoint, a copy of the relation files, and the WAL from the redo pointer to the end of the copy.
+
 ## C interface
 
 `rust/include/nilengine.h` is hand-written; `rust/capi/src/lib.rs` implements it; `nm` shows the 37 exported `nil_*` symbols. The archive needs `-lSystem -lc -lm`, which macOS links by default.
 
-- Handles: `nil_db`, `nil_batch`, `nil_snapshot`, `nil_iter`, all opaque. `nil_open(engine, dir, cf_names, num_cfs, options, errptr)` takes `NIL_ENGINE_LSM` (1) or `NIL_ENGINE_BTREE` (2); column families are numbered by position.
+- Handles: `nil_db`, `nil_batch`, `nil_snapshot`, `nil_iter`, all opaque. `nil_open(engine, dir, cf_names, num_cfs, options, errptr)` takes `NIL_ENGINE_LSM` (1), `NIL_ENGINE_BTREE` (2) or `NIL_ENGINE_PGHEAP` (3); column families are numbered by position. pgheap reads the options `fillfactor`, `checkpoint_wal_bytes`, `autovacuum`, `autovacuum_threshold`, `autovacuum_scale_percent` and `autovacuum_naptime_ms`, and sizes its buffer pool from `cache_bytes`. Adding pgheap added no function: there are still 37.
 - Errors: every call that can fail takes `char **errptr` and stores a malloc'd `"class: message"` string there (classes `io`, `corruption`, `invalid-argument`, `not-found`, `busy`, `closed`, `unsupported`, `panic`), freeing any string already present. `errptr` may be NULL.
 - Memory: values from `nil_get` and `nil_multi_get`, property strings and error strings are malloc'd and freed with `nil_free`. A found empty value is a non-NULL pointer with length 0. `nil_iter_key` and `nil_iter_value` return views valid until the next move.
 - Calls: `nil_batch_{new,put,delete,delete_range,merge,count,clear,destroy}`, `nil_write`, `nil_get`, `nil_multi_get`, `nil_snapshot_{new,seq,release}`, `nil_iter_{new,seek_to_first,seek_to_last,seek,seek_for_prev,next,prev,valid,key,value,status,destroy}`, `nil_flush`, `nil_flush_wal`, `nil_compact_range`, `nil_property`, `nil_latest_sequence`, `nil_engine_kind`, `nil_max_key_len`, `nil_version`, `nil_free`, `nil_close`.
@@ -119,19 +255,19 @@ A throwaway C program compiled with `clang -std=c11 -Wall -Wextra -Werror` again
 
 ## Go binding
 
-`internal/nilengine` wraps the C interface with cgo (`#cgo LDFLAGS: ${SRCDIR}/../../rust/target/release/libnilengine.a`). Every file except `doc.go` carries `//go:build nilengine`, so without the tag the package is empty and `go test ./...` needs no Rust. The API follows `internal/store`: `Open(kind, dir, cfs, opts)`, `Batch` (`Put`, `Delete`, `DeleteRange`, `Merge`), `Write(b, sync)`, `Get`, `GetAt(snap, ...)`, `MultiGet`, `NewSnapshot`, `NewIterator(cf, IterOptions{Snapshot, Lower, Upper, FillCache})` with `Key`/`Value` views valid until the next move, `Flush`, `FlushWAL`, `CompactRange`, `Property`, `LatestSeq`. Errors are `*nilengine.Error` values that match the sentinels (`ErrBusy`, `ErrClosed`, ...) through `errors.Is`. A `DB` is safe for concurrent use and returns `ErrClosed` after `Close`. `MultiGet` copies keys into C memory because cgo forbids passing Go memory that holds Go pointers.
+`internal/nilengine` wraps the C interface with cgo (`#cgo LDFLAGS: ${SRCDIR}/../../rust/target/release/libnilengine.a`). `Kind` is `LSM`, `BTree` or `PgHeap`. Every file except `doc.go` carries `//go:build nilengine`, so without the tag the package is empty and `go test ./...` needs no Rust. The API follows `internal/store`: `Open(kind, dir, cfs, opts)`, `Batch` (`Put`, `Delete`, `DeleteRange`, `Merge`), `Write(b, sync)`, `Get`, `GetAt(snap, ...)`, `MultiGet`, `NewSnapshot`, `NewIterator(cf, IterOptions{Snapshot, Lower, Upper, FillCache})` with `Key`/`Value` views valid until the next move, `Flush`, `FlushWAL`, `CompactRange`, `Property`, `LatestSeq`. Errors are `*nilengine.Error` values that match the sentinels (`ErrBusy`, `ErrClosed`, ...) through `errors.Is`. A `DB` is safe for concurrent use and returns `ErrClosed` after `Close`. `MultiGet` copies keys into C memory because cgo forbids passing Go memory that holds Go pointers.
 
 ## Tests
 
-Commands, run on 2026-09-27:
+Commands, last run on 2026-09-28 with all three engines:
 
 ```
-make rust-test         # cargo test --workspace: 153 passed, 4 ignored (the soak runs)
+make rust-test         # cargo test --workspace: 224 passed, 6 ignored (the soak runs)
 make rust-soak         # the ignored soak tests, NILENGINE_SOAK=24 seeds each
-make nilengine-test    # go test -tags nilengine ./internal/nilengine: 5 tests, 8 engine subtests
+make nilengine-test    # go test -tags nilengine ./internal/nilengine: 6 tests, 12 engine subtests
 ```
 
-The 153 Rust tests: 9 in `nilengine-api`, 10 LSM unit tests, 5 B+ tree unit tests, 4 C interface tests, 8 LSM and 9 B+ tree internals tests, and the conformance suite, 27 cases run twice per engine (54 per engine). The second LSM run uses 256-byte blocks, a restart point every two keys, no bloom filter and an 8 KiB memtable; the second B+ tree run uses 512-byte pages, which makes trees four or five levels deep and puts most values in overflow chains.
+The 224 Rust tests: 9 in `nilengine-api`, 10 LSM, 5 B+ tree and 6 pgheap unit tests, 5 C interface tests, 8 LSM, 9 B+ tree and 10 pgheap internals tests, and the conformance suite, 27 cases run twice per engine (54 per engine, 162 in all). The second LSM run uses 256-byte blocks, a restart point every two keys, no bloom filter and an 8 KiB memtable; the second B+ tree run uses 512-byte pages, which makes trees four or five levels deep and puts most values in overflow chains; the second pgheap run uses a 32-frame (256 KiB) buffer pool, so pages are evicted and rewritten constantly, and a checkpoint every 64 KiB of WAL, so most crashes land soon after a checkpoint and replay pages from their full-page images. Both pgheap runs keep autovacuum on (every 50 ms), and every `compact_range` in the suite runs VACUUM.
 
 The conformance suite (`rust/conformance/src/cases.rs`) checks each engine against a `BTreeMap` per column family:
 
@@ -147,7 +283,9 @@ The conformance suite (`rust/conformance/src/cases.rs`) checks each engine again
 
 The internals tests cover what the shared suite cannot see. For the LSM: data reaches levels below 0, compaction removes range tombstones (and keeps them while a snapshot needs them), a log truncated by 7 bytes recovers 9 of 10 batches, a log with a flipped byte recovers a prefix, open deletes orphan files, and a flipped byte in a table block reads as a corruption error. For the B+ tree: 20,000 random keys in 512-byte pages reach depth 4 or more, deleting three keys in four and large ranges keeps the tree correct, freed pages are reused, a snapshot blocks reuse until released, the free list is rebuilt at open, overflow pages are reused, and four hand-picked crashes: losing only the meta writes, losing only the tree pages under a surviving meta, and a data file cut 1000 bytes short (all three must fall back to the last synced commit), and keeping everything (must keep the newest commit).
 
-The soak tests (`make rust-soak`) ran 24 extra seeds of the randomized and crash cases under each of the four engine configurations. All passed. No engine code needed a fix after its first test run; the three failures seen during development were wrong expectations in tests: a fixed 100-byte key over the B+ tree's 85-byte limit at 512-byte pages, a C test expecting a key it had range-deleted, and a Go test expecting the B+ tree's transaction id to stay put when a column family is added.
+For pgheap: 5,000 updates of one key stay HOT and leave one index entry and one heap page, while a snapshot held for 50 of them still reads its version; updates of 1,900-byte values that no longer fit on their page add index entries until VACUUM removes all but one per key; values at the TOAST threshold stay inline and one byte more goes out of line, with chunk-boundary sizes and a 1 MiB value reading back before and after reopen and their chunks removed by VACUUM once replaced; VACUUM after deleting 2,000 rows leaves no dead tuples or index entries and the next 2,000 rows fit in the same pages; a snapshot held across 2,000 updates keeps all 2,000 old versions through VACUUM until it is released; autovacuum starts on its own and brings dead tuples under its threshold; an aborted batch and a flushed but uncommitted transaction whose pages a checkpoint wrote are both invisible after a crash; half of a heap page overwritten on disk after a crash comes back from its full-page image, and the same damage with no image to replay reads as a corruption error; crashes at each of four points inside a checkpoint recover every synced batch and a consistent prefix; and 34,000 transactions spanning two commit-log pages, one in 997 aborted, recover to exactly the model after a crash that tears unsynced writes.
+
+The soak tests (`make rust-soak`) ran 24 extra seeds of the randomized and crash cases under each of the six configurations on 2026-09-28 (B+ tree 57 s, LSM 410 s, pgheap 284 s). All passed. No engine code needed a fix after its first test run; the three failures seen during development were wrong expectations in tests: a fixed 100-byte key over the B+ tree's 85-byte limit at 512-byte pages, a C test expecting a key it had range-deleted, and a Go test expecting the B+ tree's transaction id to stay put when a column family is added.
 
 ## Benchmarks
 
@@ -189,22 +327,71 @@ What the numbers show:
 - The B+ tree writes single keys slowest. Each commit copies the root-to-leaf path: about 5 pages, 20 KiB of writes for a 116-byte record (10.9 million pages over 2.2 million commits in the Rust run). With 100 keys per commit it fills sequentially at 815,000 keys per second.
 - One of the three Rust runs measured the LSM's fillseq at 46.98 s; the other two took 0.57 s and 0.54 s. A rerun under macOS `sample` took 0.59 s and showed no stall inside the engine, so the outlier most likely came from other load on the shared machine. The median discards it. The other metrics varied between runs by 2% to 24% (slowest run over fastest); the LSM's Rust mixed load and the B+ tree's Rust fillseq varied most.
 
+### Update workloads, all engines
+
+Machine: the same Apple M3 Max, macOS 27.2. Date: 2026-09-28. Rust 1.98.1, Go 1.27.1, RocksDB 11.8.1 through grocksdb v1.11.1. Every figure is the median of three runs. Leaving out the B+ tree's `compact_range`, a no-op that takes under a microsecond, the slowest run of a configuration took at most 1.33 times as long per operation as the fastest (pgheap with a snapshot held), and 15 of the 21 were within 1.15. Another agent was using the machine through a separate worktree, as during phase 1.
+
+Both workloads load 10,000 keys with 100-byte values, then update random keys one per commit, unsynced, with the default options (256 MiB cache or buffer pool, pgheap's fillfactor 90 and autovacuum on unless marked). Disk sizes include logs.
+
+`nilbench --workload update-hot --hot-keys 10000 --updates 1000000`:
+
+| Engine | µs per update | Updates/s | Disk after | pgheap counters |
+|---|---:|---:|---:|---|
+| LSM | 2.90 | 345,023 | 117.4 MB | |
+| B+ tree | 21.69 | 46,111 | 69.7 MB | |
+| pgheap | 5.44 | 183,856 | 7.1 MB | 100% HOT, heap 1.7 MB, 574 dead tuples, bloat 13.6%, autovacuum never ran |
+| pgheap, autovacuum off | 5.26 | 190,079 | 7.1 MB | the same |
+
+`nilbench --workload long-snapshot --hot-keys 10000 --updates 100000`: 100,000 updates with a snapshot taken before them, then the snapshot released and `compact_range` run, then 100,000 more updates.
+
+| Engine | µs per update, snapshot held | Disk: before → held | Compact after release | Disk after compact | µs per update after | Disk after |
+|---|---:|---:|---:|---:|---:|---:|
+| LSM | 2.69 | 1.2 → 14.8 MB | 53 ms | 1.2 MB | 2.66 | 14.8 MB |
+| B+ tree | 19.62 | 2.7 → 1,231 MB | nothing to do | 1,231 MB | 22.82 | 1,231 MB |
+| pgheap | 5.79 | 3.1 → 46.7 MB | 17 ms (VACUUM) | 46.7 MB | 4.59 | 73.2 MB |
+
+pgheap's counters through that run: with the snapshot held, 10.5% of updates were HOT, 100,000 dead tuples, 99,451 index entries and a 17.0 MB heap (ten times the 1.7 MB of the update-hot run); after VACUUM, no dead tuples and 10,000 index entries, the heap still 17.0 MB; after the second 100,000 updates the heap was still 17.0 MB, and the cumulative HOT ratio had risen to 55.3%, which puts nearly all of the second 100,000 at HOT.
+
+`go test -tags nilengine -run '^$' -bench 'UpdateHot' -benchtime 500000x` and `-bench 'UpdateLongSnapshot' -benchtime 100000x` (one cgo crossing per operation):
+
+| Store | UpdateHot ns/op | Disk after | UpdateLongSnapshot ns/op | Disk: held → compacted → after 100,000 more |
+|---|---:|---:|---:|---|
+| LSM | 3,316 | 59.4 MB | 3,322 | 14.8 → 1.2 → 14.8 MB |
+| B+ tree | 20,751 | 69.7 MB | 18,757 | 1,231 → 1,231 → 1,231 MB |
+| pgheap | 6,622 | 10.2 MB | 5,823 | 46.6 → 46.6 → 33.5 MB |
+| pgheap, autovacuum off | 6,502 | 10.2 MB | | |
+| RocksDB | 4,023 | 5.1 MB | 3,579 | 15.0 → 1.2 → 15.0 MB |
+
+Through cgo pgheap reported the same shape: 100% HOT, 550 dead tuples and a 1.7 MB heap after 500,000 updates; with the snapshot held, 100,000 dead tuples and 10.6% HOT, none dead after VACUUM, and the heap at 17.0 MB in all three phases.
+
+What the numbers show:
+
+- On a small key set pgheap's updates are all HOT. After a million updates of 10,000 keys the heap holds 1.7 MB for 1.5 MB of live tuples and the index one entry per key. Pruning alone keeps dead tuples under 600, below autovacuum's threshold of 2,050 (50 + 20% of 10,000), so autovacuum never ran and turning it off changed nothing beyond noise.
+- A single-key update costs pgheap 5.4 µs in Rust, against 2.9 µs for the LSM and 21.7 µs for the B+ tree; through cgo, 6.6 µs against 3.3 µs for the LSM and 4.0 µs for RocksDB. A pgheap update looks the key up in the index, walks its HOT chain, rewrites a page, logs an update and a commit record and makes one `write` system call.
+- A snapshot held open turns about 90% of updates non-HOT and grows the heap tenfold, with 100,000 dead versions and nearly one index entry per update. One VACUUM after the release took 17 ms and left no dead tuples and one index entry per key. The heap file keeps its size, and the next 100,000 updates fit inside it, nearly all HOT.
+- The LSM and RocksDB keep versions for the snapshot too (15 MB), and a compaction after the release takes the directory back to 1.2 MB, because both rewrite files rather than reuse pages. The B+ tree cannot reuse a page any snapshot can reach, so 100,000 updates under a snapshot grew its file to 1.2 GB; it never shrinks, though later updates reuse the freed pages.
+- Most of pgheap's disk use in these tables is WAL: a checkpoint runs every 256 MiB of WAL and none of these runs reached one. The LSM likewise keeps up to 64 MiB of log before a memtable flush.
+- Not measured this round: pgheap on the phase-1 workloads (fill, read, seek, mixed at 2,000,000 keys). `make rust-bench` and `make nilengine-bench` now include pgheap in them.
+
 ## Deferred and known gaps
 
 - Compression: neither engine compresses. RocksDB in NilDB uses LZ4 and ZSTD, so phase 2 disk use will be higher on the Rust engines.
 - LSM: writers serialize on one mutex with one `write` call per commit (no group commit); no per-column-family memtables or options, prefix bloom filters, rate limiter, subcompactions or statistics counters; range tombstones live in the manifest, which suits NilDB's few drops but not millions of range deletes; every table file stays open.
 - B+ tree: 981-byte key limit at 4 KiB pages; open reads the whole file; the file never shrinks; single-key commits rewrite a root-to-leaf path (about 5 pages per commit in the benchmark); pages freed by unsynced commits wait for the next sync, which grew the 2,000,000-key fillrandom file to 437 MB.
-- Both: no checkpoints, approximate sizes, read-only open or compaction filters yet (phase 2 items below); the C interface copies each value twice on the way to Go (Rust to malloc, malloc to Go) and has no pinned-read call.
+- pgheap: one writer at a time; delete-range costs O(keys in range); no TOAST compression; the heap file never shrinks; the commit log is never truncated; pruning runs only on the write path; no background writer; the phase-1 workloads have not been benchmarked on it.
+- All engines: no checkpoints, approximate sizes, read-only open or compaction filters yet (phase 2 items below); the C interface copies each value twice on the way to Go (Rust to malloc, malloc to Go) and has no pinned-read call.
 
 ## Phase 2 plan: the engines behind `internal/store`
 
-The upper layers (`redis`, `cmddoc`, `query`, `analytics`, `admin`, `docstore`, `catalog`, `server`) keep calling `store.Store`, `store.Reader`, `store.Txn`, `store.Iterator` and `store.Snapshot` exactly as today. Only `internal/store` and `cmd/nildb` change.
+The upper layers (`redis`, `cmddoc`, `query`, `analytics`, `admin`, `docstore`, `catalog`, `server`) keep calling `store.Store`, `store.Reader`, `store.Txn`, `store.Iterator` and `store.Snapshot` exactly as today. The engine work stays inside `internal/store`. Outside it, `internal/config` gains the flag, `cmd/nildb` passes it to the store, and `internal/admin` and `internal/server` change a few INFO lines (step 3). Those two need edits because `store.Version()` (the linked RocksDB version) and `store.ShimActive()` (RocksDB's read-options shim) are package-level functions, which cannot tell which engine a `Store` opened.
 
 ### Step 1: an engine seam inside the package
 
 Add an unexported interface in `internal/store`, for example `kv`, with the calls the package makes on RocksDB today: open with the eight families, write a batch (with sync), get, multi-get, iterator with bounds and options, snapshot and release, flush, flush-WAL, compact-range, property, latest sequence, close. Move the grocksdb code (`store.go` open and close, `reader.go`, `iterator.go`, `snapshot.go`, `txn.go`, `admin.go`, `drop.go`, `options.go`, the filters, the merge operator, the read-options shim) behind a `rocksKV` implementation without changing its behaviour, and add `nilKV` over `internal/nilengine`. Everything that is NilDB logic rather than RocksDB stays above the seam and serves all engines: the layout marker check, the version generator, the snapshot registry with leases and the janitor, the lock manager, `ScheduleCompact`, `DeleteRanges`.
 
-`store.Config` gains `Engine string` (`"rocksdb"` default, `"lsm"`, `"btree"`). `nilKV` compiles only with `-tags nilengine`; without the tag, `Open` with `lsm` or `btree` fails with "built without nilengine", so the default build still needs no Rust. The store writes an `ENGINE` file into a new directory and refuses to open a directory with another engine's marker; the LSM's `CURRENT` and `MANIFEST-*` names would otherwise collide with RocksDB's.
+`store.Config` gains `Engine string` (`"rocksdb"` default, `"lsm"`, `"btree"`). `nilKV` compiles only with `-tags nilengine`; without the tag, `Open` with `lsm` or `btree` fails with "built without nilengine", so the default build still needs no Rust. The store writes an `ENGINE` file into a new directory and refuses to open a directory with another engine's marker; the LSM's `CURRENT` and `MANIFEST-*` names would otherwise collide with RocksDB's. A directory without the file belongs to RocksDB, so today's data directories and RocksDB checkpoints open unchanged. `Checkpoint` writes the marker into the checkpoint directory after the engine call, and `OpenReadOnly` (`--readonly`) runs the same check, so an LSM checkpoint cannot be opened as RocksDB. The LSM's open-time cleanup deletes only `*.log`, `*.sst`, `MANIFEST-*` and `*.tmp` files, and the B+ tree touches only `data.nbt` and `LOCK`, so neither engine removes the marker.
+
+The seam also adds three methods for the callers of the package-level functions: `(*Store).Engine()` returns `"rocksdb"`, `"lsm"` or `"btree"`; `(*Store).EngineVersion()` returns RocksDB's version or `nil_version()`; `(*Store).ShimActive()` returns the package-level result under RocksDB and false with the reason "engine lsm has no rate limiter" (or `btree`) otherwise. `store.Version()` and `store.ShimActive()` stay, because RocksDB is still linked.
 
 ### Step 2: map every RocksDB feature `internal/store` relies on
 
@@ -222,21 +409,25 @@ The sweeper runs every 10 minutes by default with a byte budget per round. On th
 
 **Checkpoints.** `ROCKS.CHECKPOINT` uses `CreateCheckpoint(dir, 0)`, and `--readonly` opens a checkpoint with `OpenDbForReadOnlyColumnFamilies`. New engine calls: `nil_checkpoint(db, dir)`. For the LSM it flushes the memtable, hard-links every live table file into `dir` and writes a manifest and `CURRENT` there; table files are immutable, as RocksDB's checkpoint relies on. For the B+ tree it holds a snapshot, clones `data.nbt` with APFS `clonefile` (copying on other file systems), and writes a meta page for the snapshot's roots into the copy. A read-only open flag follows (shared `flock`, no writes, no background threads). `ExportCF` and `Ingest` stay RocksDB-only.
 
-**Properties.** The engines already answer the RocksDB names they can (`rocksdb.estimate-num-keys`, `rocksdb.num-snapshots`, `rocksdb.num-files-at-level<N>`, `rocksdb.total-sst-files-size`, `rocksdb.cur-size-all-mem-tables`, `rocksdb.estimate-pending-compaction-bytes`, `rocksdb.block-cache-usage`, `rocksdb.stats`) and return nothing for others, which `store.Property` already reports as absent. `IntProperty` parses the string. `rocksdb.oldest-snapshot-time` comes from the store's own registry. `ApproxSizes` feeds the query planner (`query/planner.go`) and `DOC.STATS`, so phase 2 adds `nil_approximate_sizes`: the LSM sums the bytes of overlapping files, prorated by key range, plus the memtable share; the B+ tree estimates from key counts and the depth.
+**Properties.** Both engines answer `rocksdb.estimate-num-keys`, `rocksdb.num-snapshots`, `rocksdb.block-cache-usage`, `rocksdb.block-cache-capacity` and `rocksdb.stats`. The LSM also answers `rocksdb.num-files-at-level<N>`, `rocksdb.total-sst-files-size`, `rocksdb.cur-size-all-mem-tables`, `rocksdb.cur-size-active-mem-table`, `rocksdb.num-immutable-mem-table`, `rocksdb.estimate-pending-compaction-bytes` and `rocksdb.oldest-snapshot-sequence`. Other names return nothing, which `store.Property` already reports as absent; `IntProperty` parses the string. `rocksdb.oldest-snapshot-time` comes from the store's own registry.
 
-**Rate limiter and the priority shim.** `IterOpts.LowPriority` reaches RocksDB through the cgo shim that sets `rate_limiter_priority = IO_LOW`, and the rate limiter caps background I/O at 200 MiB/s. The Rust engines have neither; `store.ShimActive()` reports false with the reason "engine lsm has no rate limiter", the path it already takes when the shim's self-check fails. A token bucket for LSM flush and compaction writes, with low-priority reads charged to it, is a follow-up.
+`internal/admin` reads nine more names: `rocksdb.estimate-live-data-size`, `rocksdb.live-sst-files-size`, `rocksdb.size-all-mem-tables`, `rocksdb.num-entries-active-mem-table`, `rocksdb.mem-table-flush-pending`, `rocksdb.compaction-pending` and `rocksdb.block-cache-pinned-usage` for `ROCKS.CF INFO`, which skips a name the engine does not report, and `rocksdb.num-running-flushes` and `rocksdb.num-running-compactions` for the INFO `rocksdb` section, which prints 0 for one. Phase 2 adds all nine to the LSM, which has the flush and compaction threads, memtables and version to answer them. On the B+ tree they stay absent, since it has no memtable, table files or compaction. With one cache per engine, the INFO `analytics_cache_*` fields repeat the main cache's figures.
 
-**Other iterator options.** `FillCache` maps to `fill_cache`. `Readahead` and `AsyncIO` are ignored; the operating system reads ahead. `Deadline` moves into the store's iterator wrapper, which checks the clock every 64 moves and returns the same timed-out error the query layer handles today.
+`ApproxSizes` feeds the query planner (`query/planner.go`) and `DOC.STATS`, so phase 2 adds `nil_approximate_sizes`: the LSM sums the bytes of overlapping files, prorated by key range, plus the memtable share; the B+ tree estimates from key counts and the depth.
+
+**Rate limiter and the priority shim.** `IterOpts.LowPriority` reaches RocksDB through the cgo shim that sets `rate_limiter_priority = IO_LOW`, and the rate limiter caps background I/O at 200 MiB/s. The Rust engines have neither; `(*Store).ShimActive()` (step 1) reports false with the reason "engine lsm has no rate limiter", the answer the package-level check already gives when the shim's self-check fails, and `internal/admin` switches its two calls (`ROCKS.INFO` and the INFO `rocksdb` section) to the method. A token bucket for LSM flush and compaction writes, with low-priority reads charged to it, is a follow-up.
+
+**Other iterator options.** `FillCache` maps to `fill_cache`. `Readahead` and `AsyncIO` are ignored; the operating system reads ahead. `Deadline` is RocksDB's `ReadOptions` deadline today (`iterator.go`). For the Rust engines the store's iterator wrapper enforces it, checking the clock every 64 moves and failing with an error whose text contains `timed out`, which `readErr` in `query/op.go` already maps to `ErrTimeout`.
 
 **Column-family options, caches and the write buffer manager.** Per-family write buffers, per-level compression, periodic compaction, the two HyperClockCaches and the `WriteBufferManager` have no counterpart. `BlockCacheBytes` maps to `cache_bytes`, `WriteBufferBytes` to `write_buffer_size` (one memtable budget for all families), and `AnalyticsCacheBytes` is ignored because each engine has one cache.
 
 **Durability.** `--fsync always` sets `sync` per commit, `everysec` keeps its ticker calling `FlushWAL(true)`, `no` does nothing. The B+ tree keeps its tree intact without syncs and additionally syncs every `max_unsynced_free_pages` freed pages.
 
-**The rest.** `SetOption` returns `ErrUnsupported`. `Stats` returns the `nil.stats` property. `Version` and `ROCKS.INFO` report the engine name and `nil_version()`. `LatestSeq` maps to `latest_sequence`, which on the B+ tree is a transaction id: it still grows with every commit, which is all that `ROCKS.SEQ` and the checkpoint reply promise. `ScheduleCompact` calls `compact_range`, a no-op on the B+ tree.
+**The rest.** `SetOption`, `Ingest` and `ExportCF` return a new `store.ErrUnsupported` whose text reads "not supported with --engine lsm" (or `btree`). `Stats` returns the `nil.stats` property with or without `--rocks-stats`, because `Config.Statistics` only switches on RocksDB's optional counters and the engines keep none. `ROCKS.INFO` reports `EngineVersion()` as its `version` and adds an `engine` field. `LatestSeq` maps to `latest_sequence`, which on the B+ tree is a transaction id: it still grows with every commit, which is all that `ROCKS.SEQ` and the checkpoint reply promise. `ScheduleCompact` calls `compact_range`, a no-op on the B+ tree.
 
 ### Step 3: the `--engine` flag and `ROCKS.*`
 
-`cmd/nildb` gets `--engine rocksdb|lsm|btree` (default `rocksdb`), passed through `internal/config` into `store.Config.Engine`. `INFO` gains `engine:` in its server section.
+`cmd/nildb` gets `--engine rocksdb|lsm|btree` (default `rocksdb`), passed through `internal/config` into `store.Config.Engine`. INFO's server section (`internal/server/info.go`) gains `nildb_engine:` and `nildb_engine_version:` next to `nildb_rocksdb_version`, which keeps naming the linked library. The INFO `rocksdb` section's `rocksdb_version` reports `EngineVersion()`, and the startup log line names the engine instead of always printing the RocksDB version.
 
 | Command | With `--engine lsm` or `btree` |
 |---|---|
@@ -246,19 +437,22 @@ The sweeper runs every 10 minutes by default with a byte budget per round. On th
 | `ROCKS.CHECKPOINT dir` | works once `nil_checkpoint` lands; `ROCKS.CHECKPOINT dir CF cf` stays RocksDB-only |
 | `ROCKS.INGEST`, `ROCKS.SETOPTION` | RocksDB-only; reply `ERR not supported with --engine lsm` (or `btree`) |
 
-The names stay `ROCKS.*` so scripts written against RocksDB keep working.
+The names stay `ROCKS.*` so scripts written against RocksDB keep working. The RocksDB-only replies need no new code in `internal/admin`: its `storeErr` prefixes `ERR ` to any store error it does not map, so the text of `store.ErrUnsupported` becomes the reply.
 
 ### Step 4: tests and measurements
 
 - Run `internal/store`'s tests against all three engines, choosing the engine from `NILDB_TEST_ENGINE` under the `nilengine` tag. Tests of RocksDB-only features (`Ingest`, `SetOption`, filter verdicts) skip on the Rust engines; the sweeper gets its own tests.
-- Run the server-level tests in `internal/testutil` and the `ROCKS.*` tests with `--engine lsm` and `--engine btree`.
+- Run the server-level tests in `internal/testutil`, the `ROCKS.*` and INFO tests in `internal/admin` and the binary tests in `cmd/nildb` with `--engine lsm` and `--engine btree`.
 - Keep the Rust conformance suite as the engines' gate, and add a store-level crash test: kill the server process during a write load and check that every acknowledged `--fsync always` write survives.
 - Repeat the benchmark above through `store` and add `redis-benchmark -P 16` and `cmd/htapbench` runs per engine.
 
-Order: the seam with `rocksKV` first, with no behaviour change and the existing test suite green; then `nilKV` with the overlay transaction and the flag; then approximate sizes, the sweeper and checkpoints; the rate limiter and compaction-loop filters last.
+Order: the seam with `rocksKV` first, with no behaviour change and the existing test suite green; then `nilKV` with the overlay transaction, the flag and the engine-aware INFO fields; then approximate sizes, the sweeper and checkpoints; the rate limiter and compaction-loop filters last.
 
 ## Sources
 
+- PostgreSQL documentation, current version: "Database Page Layout" (https://www.postgresql.org/docs/current/storage-page-layout.html), "Concurrency Control" (https://www.postgresql.org/docs/current/mvcc.html), "Routine Vacuuming" (https://www.postgresql.org/docs/current/routine-vacuuming.html).
+- PostgreSQL source tree (PostgreSQL License), github.com/postgres/postgres: `src/backend/access/heap/README.HOT`, `src/backend/access/nbtree/README`, `src/backend/access/transam/README`, `src/include/access/heaptoast.h` (TOAST_TUPLES_PER_PAGE and EXTERN_TUPLES_PER_PAGE, both 4), `src/backend/postmaster/walwriter.c` (WalWriterDelay = 200 ms).
+- Philip L. Lehman and S. Bing Yao, "Efficient Locking for Concurrent Operations on B-Trees", ACM TODS 6(4), 1981.
 - LevelDB (BSD-3-Clause): `doc/table_format.md`, `doc/log_format.md`, `db/dbformat.h`, `db/skiplist.h`, `db/version_set.cc`, `db/db_iter.cc`, `util/bloom.cc`, github.com/google/leveldb.
 - RocksDB wiki, "DeleteRange" and "DeleteRange Implementation" (fragmented range tombstones); RocksDB `CompactionIterator` for snapshot stripes; WAL recovery modes.
 - Howard Chu, "MDB: A Memory-Mapped Database and Backend for OpenLDAP", LDAPCon 2011.

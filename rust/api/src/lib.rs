@@ -1,7 +1,8 @@
-//! The storage engine API of NilDB. The LSM tree (`nilengine-lsm`) and the
-//! copy-on-write B+ tree (`nilengine-btree`) implement [`Engine`]; the C
-//! interface (`nilengine-capi`) exposes it to the Go server, and
-//! `nilengine-conformance` checks both engines against one model.
+//! The storage engine API of NilDB. The LSM tree (`nilengine-lsm`), the
+//! copy-on-write B+ tree (`nilengine-btree`) and the PostgreSQL-style heap
+//! (`nilengine-pgheap`) implement [`Engine`]; the C interface
+//! (`nilengine-capi`) exposes it to the Go server, and
+//! `nilengine-conformance` checks every engine against one model.
 
 pub mod batch;
 pub mod cache;

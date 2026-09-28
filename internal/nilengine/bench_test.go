@@ -2,15 +2,20 @@
 
 package nilengine
 
-// One workload on three stores: the LSM engine and the B+ tree engine
-// through this binding, and RocksDB through grocksdb, the library
-// internal/store uses. Every store crosses cgo once per operation, so the
-// comparison includes the same binding cost NilDB pays.
+// One workload on four stores: the LSM, B+ tree and pgheap engines through
+// this binding, and RocksDB through grocksdb, the library internal/store
+// uses. Every store crosses cgo once per operation, so the comparison
+// includes the same binding cost NilDB pays.
 //
-// Settings shared by all three: 64 MiB write buffer, 256 MiB block or page
-// cache, bloom filters at 10 bits per key (LSM and RocksDB), no compression,
-// unsynced writes. RocksDB keeps its other defaults and runs two background
-// jobs, matching the LSM engine's flush and compaction threads.
+// Settings shared by all four: 64 MiB write buffer, 256 MiB block cache,
+// page cache or buffer pool, bloom filters at 10 bits per key (LSM and
+// RocksDB), no compression, unsynced writes. RocksDB keeps its other
+// defaults and runs two background jobs, matching the LSM engine's flush and
+// compaction threads.
+//
+// BenchmarkUpdateHot and BenchmarkUpdateLongSnapshot update a small key set
+// (hotKeys keys) and report disk use; on pgheap they also report the HOT
+// ratio, dead tuples and heap size.
 //
 //	make rust-build
 //	go test -tags nilengine -run '^$' -bench . -benchtime 200000x ./internal/nilengine
@@ -20,7 +25,9 @@ package nilengine
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -40,13 +47,22 @@ type store interface {
 	write(keys [][]byte, vals [][]byte) error
 	get(key []byte) (bool, error)
 	seekNext(key []byte, n int) (int, error)
+	// snapshot pins the current state until the returned func runs.
+	snapshot() (func(), error)
+	// compact runs a full compaction (VACUUM on pgheap).
+	compact() error
+	prop(name string) (string, bool)
 	close() error
 }
 
 type nilStore struct{ db *DB }
 
 func openNil(kind Kind, dir string) (store, error) {
-	opts := fmt.Sprintf("write_buffer_size=%d;cache_bytes=%d;bloom_bits_per_key=10", writeBuffer, cacheBytes)
+	return openNilWith(kind, dir, "")
+}
+
+func openNilWith(kind Kind, dir, extra string) (store, error) {
+	opts := fmt.Sprintf("write_buffer_size=%d;cache_bytes=%d;bloom_bits_per_key=10;%s", writeBuffer, cacheBytes, extra)
 	db, err := Open(kind, dir, []string{"default"}, opts)
 	if err != nil {
 		return nil, err
@@ -82,6 +98,18 @@ func (s nilStore) seekNext(key []byte, n int) (int, error) {
 }
 
 func (s nilStore) close() error { return s.db.Close() }
+
+func (s nilStore) snapshot() (func(), error) {
+	snap, err := s.db.NewSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	return snap.Release, nil
+}
+
+func (s nilStore) compact() error { return s.db.CompactRange(0, nil, nil) }
+
+func (s nilStore) prop(name string) (string, bool) { return s.db.Property(0, name) }
 
 type rocksStore struct {
 	db   *grocksdb.DB
@@ -143,12 +171,30 @@ func (s *rocksStore) close() error {
 	return nil
 }
 
-var stores = []struct {
+func (s *rocksStore) snapshot() (func(), error) {
+	snap := s.db.NewSnapshot()
+	return func() { s.db.ReleaseSnapshot(snap) }, nil
+}
+
+func (s *rocksStore) compact() error {
+	s.db.CompactRange(grocksdb.Range{})
+	return nil
+}
+
+func (s *rocksStore) prop(name string) (string, bool) {
+	v := s.db.GetProperty(name)
+	return v, v != ""
+}
+
+type namedStore struct {
 	name string
 	open func(dir string) (store, error)
-}{
+}
+
+var stores = []namedStore{
 	{"lsm", func(d string) (store, error) { return openNil(LSM, d) }},
 	{"btree", func(d string) (store, error) { return openNil(BTree, d) }},
+	{"pgheap", func(d string) (store, error) { return openNil(PgHeap, d) }},
 	{"rocksdb", openRocks},
 }
 
@@ -353,6 +399,128 @@ func BenchmarkMixed(b *testing.B) {
 					}
 				}
 			})
+		})
+	}
+}
+
+// hotKeys is the key set the update benchmarks rewrite.
+const hotKeys = 10_000
+
+// updateStores adds pgheap without autovacuum to the four stores.
+var updateStores = append(append([]namedStore{}, stores...), namedStore{
+	"pgheap-noautovacuum",
+	func(d string) (store, error) { return openNilWith(PgHeap, d, "autovacuum=false") },
+})
+
+func dirBytes(dir string) int64 {
+	var n int64
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if info, err := d.Info(); err == nil {
+				n += info.Size()
+			}
+		}
+		return nil
+	})
+	return n
+}
+
+func propNum(s store, name string) (float64, bool) {
+	v, ok := s.prop(name)
+	if !ok {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	return f, err == nil
+}
+
+// reportHeap adds pgheap's counters to a benchmark result, with `suffix`
+// naming the phase.
+func reportHeap(b *testing.B, s store, suffix string) {
+	upd, ok := propNum(s, "nil.pgheap.n-tup-upd")
+	if !ok {
+		return
+	}
+	hot, _ := propNum(s, "nil.pgheap.n-tup-hot-upd")
+	dead, _ := propNum(s, "nil.pgheap.n-dead-tup")
+	heap, _ := propNum(s, "nil.pgheap.heap-bytes")
+	if upd > 0 {
+		b.ReportMetric(100*hot/upd, "hot-%"+suffix)
+	}
+	b.ReportMetric(dead, "dead-tuples"+suffix)
+	b.ReportMetric(heap/1e6, "heap-MB"+suffix)
+}
+
+func loadHot(b *testing.B, s store) {
+	fill(b, s, func(i uint64) uint64 { return i }, hotKeys, 1000)
+}
+
+func updateRandom(b *testing.B, s store, n int, seed uint64) {
+	r := rng(seed)
+	key := [][]byte{nil}
+	val := [][]byte{nil}
+	for i := range n {
+		key[0] = benchKey(r.below(hotKeys))
+		val[0] = valuePool[i%len(valuePool)]
+		if err := s.write(key, val); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkUpdateHot rewrites random keys of a 10,000-key set, one key per
+// commit: the case HOT updates and pruning exist for.
+func BenchmarkUpdateHot(b *testing.B) {
+	for _, st := range updateStores {
+		b.Run(st.name, func(b *testing.B) {
+			dir := b.TempDir()
+			s, err := st.open(dir)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer s.close()
+			loadHot(b, s)
+			b.ResetTimer()
+			updateRandom(b, s, b.N, 17)
+			b.StopTimer()
+			b.ReportMetric(float64(dirBytes(dir))/1e6, "disk-MB")
+			reportHeap(b, s, "")
+		})
+	}
+}
+
+// BenchmarkUpdateLongSnapshot times b.N updates of the 10,000-key set while
+// a snapshot taken before them stays open, then releases it, compacts
+// (VACUUM on pgheap) and runs b.N more updates untimed. It reports disk use
+// at the end of each phase: -held, -compacted and -reuse.
+func BenchmarkUpdateLongSnapshot(b *testing.B) {
+	for _, st := range stores {
+		b.Run(st.name, func(b *testing.B) {
+			dir := b.TempDir()
+			s, err := st.open(dir)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer s.close()
+			loadHot(b, s)
+			release, err := s.snapshot()
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ResetTimer()
+			updateRandom(b, s, b.N, 29)
+			b.StopTimer()
+			b.ReportMetric(float64(dirBytes(dir))/1e6, "disk-MB-held")
+			reportHeap(b, s, "-held")
+			release()
+			if err := s.compact(); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportMetric(float64(dirBytes(dir))/1e6, "disk-MB-compacted")
+			reportHeap(b, s, "-compacted")
+			updateRandom(b, s, b.N, 31)
+			b.ReportMetric(float64(dirBytes(dir))/1e6, "disk-MB-reuse")
+			reportHeap(b, s, "-reuse")
 		})
 	}
 }

@@ -31,6 +31,7 @@ dependencies = [
  "nilengine-api",
  "nilengine-btree",
  "nilengine-lsm",
+ "nilengine-pgheap",
 ]
 
 [[package]]
@@ -48,6 +49,7 @@ dependencies = [
  "nilengine-api",
  "nilengine-btree",
  "nilengine-lsm",
+ "nilengine-pgheap",
 ]
 
 [[package]]
@@ -59,6 +61,14 @@ dependencies = [
 
 [[package]]
 name = "nilengine-lsm"
+version = "0.1.0"
+dependencies = [
+ "nilengine-api",
+ "nilengine-conformance",
+]
+
+[[package]]
+name = "nilengine-pgheap"
 version = "0.1.0"
 dependencies = [
  "nilengine-api",

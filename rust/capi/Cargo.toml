@@ -14,3 +14,4 @@ crate-type = ["staticlib", "rlib"]
 nilengine-api.workspace = true
 nilengine-lsm.workspace = true
 nilengine-btree.workspace = true
+nilengine-pgheap.workspace = true

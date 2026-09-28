@@ -1,4 +1,4 @@
-//! nilbench: db_bench-style workloads on the LSM and B+ tree engines.
+//! nilbench: db_bench-style workloads on the LSM, B+ tree and pgheap engines.
 //!
 //! For each engine it runs, in fresh directories:
 //!   fillseq     N keys in key order, `--batch` keys per commit
@@ -9,6 +9,16 @@
 //!               80% reads and 20% single-key writes
 //! Keys are 16 decimal digits; values are `--value-size` pseudo-random bytes.
 //! Writes are not synced, as in db_bench's default.
+//!
+//! `--workload` picks the set: `basic` (the five above, the default),
+//! `update-hot`, `long-snapshot` or `all`:
+//!   update-hot     `--updates` single-key updates of random keys among
+//!                  `--hot-keys` loaded keys; pgheap runs twice, with and
+//!                  without autovacuum
+//!   long-snapshot  a snapshot is taken after loading `--hot-keys` keys,
+//!                  `--updates` updates run while it is held, then it is
+//!                  released, `compact_range` runs (VACUUM on pgheap), and
+//!                  `--updates` more updates show whether space is reused
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +28,7 @@ use nilengine_api::{Engine, EngineKind, IterOptions, Options, WriteBatch, WriteO
 
 struct Args {
     engines: Vec<EngineKind>,
+    workload: String,
     num: u64,
     value_size: usize,
     batch: usize,
@@ -25,6 +36,8 @@ struct Args {
     seeks: u64,
     threads: usize,
     mixed_ops: u64,
+    hot_keys: u64,
+    updates: u64,
     cache_mb: usize,
     dir: PathBuf,
     keep: bool,
@@ -32,15 +45,17 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: nilbench [--engine lsm|btree|all] [--num N] [--value-size B] [--batch B] [--reads N] \
-         [--seeks N] [--threads T] [--mixed-ops N] [--cache-mb M] [--dir DIR] [--keep]"
+        "usage: nilbench [--engine lsm|btree|pgheap|all] [--workload basic|update-hot|long-snapshot|all] \
+         [--num N] [--value-size B] [--batch B] [--reads N] [--seeks N] [--threads T] [--mixed-ops N] \
+         [--hot-keys N] [--updates N] [--cache-mb M] [--dir DIR] [--keep]"
     );
     std::process::exit(2);
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
-        engines: vec![EngineKind::Lsm, EngineKind::BTree],
+        engines: vec![EngineKind::Lsm, EngineKind::BTree, EngineKind::PgHeap],
+        workload: "basic".into(),
         num: 1_000_000,
         value_size: 100,
         batch: 100,
@@ -48,6 +63,8 @@ fn parse_args() -> Args {
         seeks: 200_000,
         threads: 4,
         mixed_ops: 1_000_000,
+        hot_keys: 10_000,
+        updates: 1_000_000,
         cache_mb: 256,
         dir: PathBuf::from("target/bench-data"),
         keep: false,
@@ -63,7 +80,7 @@ fn parse_args() -> Args {
         match flag.as_str() {
             "--engine" => {
                 a.engines = match v.as_str() {
-                    "all" => vec![EngineKind::Lsm, EngineKind::BTree],
+                    "all" => vec![EngineKind::Lsm, EngineKind::BTree, EngineKind::PgHeap],
                     s => vec![EngineKind::parse(s).unwrap_or_else(|| usage())],
                 }
             }
@@ -74,6 +91,12 @@ fn parse_args() -> Args {
             "--seeks" => a.seeks = num(),
             "--threads" => a.threads = num().max(1) as usize,
             "--mixed-ops" => a.mixed_ops = num(),
+            "--hot-keys" => a.hot_keys = num().max(1),
+            "--updates" => a.updates = num(),
+            "--workload" => match v.as_str() {
+                "basic" | "update-hot" | "long-snapshot" | "all" => a.workload = v.clone(),
+                _ => usage(),
+            },
             "--cache-mb" => a.cache_mb = num() as usize,
             "--dir" => a.dir = PathBuf::from(v),
             _ => usage(),
@@ -129,33 +152,43 @@ impl Values {
 }
 
 fn open(kind: EngineKind, dir: &Path, a: &Args) -> Box<dyn Engine> {
+    open_with(kind, dir, a, true)
+}
+
+fn open_with(kind: EngineKind, dir: &Path, a: &Args, autovacuum: bool) -> Box<dyn Engine> {
     let opts = Options {
         cache_bytes: a.cache_mb << 20,
+        autovacuum,
         ..Options::default()
     };
     let res = match kind {
         EngineKind::Lsm => nilengine_lsm::open_boxed(dir, &["default"], &opts),
         EngineKind::BTree => nilengine_btree::open_boxed(dir, &["default"], &opts),
+        EngineKind::PgHeap => nilengine_pgheap::open_boxed(dir, &["default"], &opts),
     };
     res.unwrap_or_else(|e| panic!("open {}: {e}", dir.display()))
 }
 
+/// Bytes of every file under `dir` (pgheap keeps its files in
+/// subdirectories).
 fn dir_bytes(dir: &Path) -> u64 {
     std::fs::read_dir(dir)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter_map(|e| e.metadata().ok())
-                .filter(|m| m.is_file())
-                .map(|m| m.len())
+                .map(|e| match e.metadata() {
+                    Ok(m) if m.is_dir() => dir_bytes(&e.path()),
+                    Ok(m) => m.len(),
+                    Err(_) => 0,
+                })
                 .sum()
         })
         .unwrap_or(0)
 }
 
-fn report(engine: EngineKind, name: &str, ops: u64, secs: f64, note: &str) {
+fn report(engine: &str, name: &str, ops: u64, secs: f64, note: &str) {
     println!(
-        "| {:<5} | {:<10} | {:>9} | {:>7.2} | {:>10.0} | {:>7.2} | {} |",
-        engine.name(),
+        "| {:<6} | {:<10} | {:>9} | {:>7.2} | {:>10.0} | {:>7.2} | {} |",
+        engine,
         name,
         ops,
         secs,
@@ -195,7 +228,7 @@ fn run(kind: EngineKind, a: &Args, vals: &Values) {
     let secs = t.elapsed().as_secs_f64();
     let bytes = n as f64 * (16 + a.value_size) as f64;
     report(
-        kind,
+        kind.name(),
         "fillseq",
         n,
         secs,
@@ -216,7 +249,7 @@ fn run(kind: EngineKind, a: &Args, vals: &Values) {
     let secs = t.elapsed().as_secs_f64();
     drop(perm);
     report(
-        kind,
+        kind.name(),
         "fillrandom",
         n,
         secs,
@@ -235,7 +268,7 @@ fn run(kind: EngineKind, a: &Args, vals: &Values) {
         }
     }
     report(
-        kind,
+        kind.name(),
         "readrandom",
         a.reads,
         t.elapsed().as_secs_f64(),
@@ -259,7 +292,7 @@ fn run(kind: EngineKind, a: &Args, vals: &Values) {
     it.status().expect("iterator");
     drop(it);
     report(
-        kind,
+        kind.name(),
         "seek+10next",
         a.seeks,
         t.elapsed().as_secs_f64(),
@@ -293,7 +326,7 @@ fn run(kind: EngineKind, a: &Args, vals: &Values) {
         h.join().expect("mixed worker");
     }
     report(
-        kind,
+        kind.name(),
         "mixed",
         per * a.threads as u64,
         t.elapsed().as_secs_f64(),
@@ -310,19 +343,170 @@ fn run(kind: EngineKind, a: &Args, vals: &Values) {
     }
 }
 
+/// Loads `--hot-keys` keys in batches of 1000 into a fresh engine.
+fn load_hot(e: &dyn Engine, a: &Args, vals: &Values) {
+    fill(e, 0..a.hot_keys, 1000, vals);
+    e.flush_wal(true).expect("sync");
+}
+
+/// `n` single-key updates of random keys among the hot keys.
+fn update_random(e: &dyn Engine, a: &Args, vals: &Values, n: u64, seed: u64) {
+    let mut r = Rng(seed);
+    let mut b = WriteBatch::new();
+    for _ in 0..n {
+        b.clear();
+        b.put(0, &key(r.below(a.hot_keys)), vals.get(&mut r));
+        e.write(&b, WriteOptions::default()).expect("write");
+    }
+}
+
+fn prop(e: &dyn Engine, name: &str) -> u64 {
+    e.property(0, name)
+        .and_then(|v| v.parse::<f64>().ok())
+        .map_or(0, |v| v as u64)
+}
+
+fn mb(bytes: u64) -> f64 {
+    bytes as f64 / 1e6
+}
+
+/// Heap-specific counters for a note, or nothing for the other engines.
+fn pg_note(kind: EngineKind, e: &dyn Engine) -> String {
+    if kind != EngineKind::PgHeap {
+        return String::new();
+    }
+    let upd = prop(e, "nil.pgheap.n-tup-upd").max(1);
+    format!(
+        ", HOT {:.1}%, dead {}, heap {:.1} MB, bloat {}%, autovacuum {}, index entries {}",
+        100.0 * prop(e, "nil.pgheap.n-tup-hot-upd") as f64 / upd as f64,
+        prop(e, "nil.pgheap.n-dead-tup"),
+        mb(prop(e, "nil.pgheap.heap-bytes")),
+        e.property(0, "nil.pgheap.bloat-pct").unwrap_or_default(),
+        prop(e, "nil.pgheap.autovacuum-count"),
+        prop(e, "nil.pgheap.index-entries"),
+    )
+}
+
+fn update_hot(kind: EngineKind, autovacuum: bool, a: &Args, vals: &Values) {
+    let label = match (kind, autovacuum) {
+        (EngineKind::PgHeap, false) => "pgheap, no autovacuum".to_string(),
+        _ => kind.name().to_string(),
+    };
+    let dir = a.dir.join(format!("{}-hot-{autovacuum}", kind.name()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = open_with(kind, &dir, a, autovacuum);
+    load_hot(&*e, a, vals);
+    let t = Instant::now();
+    update_random(&*e, a, vals, a.updates, 21);
+    e.flush_wal(true).expect("sync");
+    let secs = t.elapsed().as_secs_f64();
+    report(
+        &label,
+        "update-hot",
+        a.updates,
+        secs,
+        &format!(
+            "{} keys, {:.1} MB on disk{}",
+            a.hot_keys,
+            mb(dir_bytes(&dir)),
+            pg_note(kind, &*e)
+        ),
+    );
+    e.close().expect("close");
+    if !a.keep {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+fn long_snapshot(kind: EngineKind, a: &Args, vals: &Values) {
+    let dir = a.dir.join(format!("{}-longsnap", kind.name()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = open_with(kind, &dir, a, true);
+    load_hot(&*e, a, vals);
+    let before = dir_bytes(&dir);
+    let snap = e.snapshot().expect("snapshot");
+    let t = Instant::now();
+    update_random(&*e, a, vals, a.updates, 31);
+    e.flush_wal(true).expect("sync");
+    let secs = t.elapsed().as_secs_f64();
+    let held = dir_bytes(&dir);
+    report(
+        kind.name(),
+        "snap-held",
+        a.updates,
+        secs,
+        &format!(
+            "disk {:.1} -> {:.1} MB{}",
+            mb(before),
+            mb(held),
+            pg_note(kind, &*e)
+        ),
+    );
+    drop(snap);
+    let t = Instant::now();
+    e.compact_range(0, None, None).expect("compact");
+    let secs = t.elapsed().as_secs_f64();
+    let released = dir_bytes(&dir);
+    report(
+        kind.name(),
+        "compact",
+        1,
+        secs,
+        &format!(
+            "after release, disk {:.1} MB{}",
+            mb(released),
+            pg_note(kind, &*e)
+        ),
+    );
+    let t = Instant::now();
+    update_random(&*e, a, vals, a.updates, 41);
+    e.flush_wal(true).expect("sync");
+    let secs = t.elapsed().as_secs_f64();
+    report(
+        kind.name(),
+        "reuse",
+        a.updates,
+        secs,
+        &format!(
+            "disk {:.1} -> {:.1} MB{}",
+            mb(released),
+            mb(dir_bytes(&dir)),
+            pg_note(kind, &*e)
+        ),
+    );
+    e.close().expect("close");
+    if !a.keep {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn main() {
     let a = parse_args();
     let vals = Values::new(a.value_size);
     println!(
-        "keys: {}, value size: {} B, cache: {} MiB, directory: {}",
+        "keys: {}, hot keys: {}, updates: {}, value size: {} B, cache: {} MiB, directory: {}",
         a.num,
+        a.hot_keys,
+        a.updates,
         a.value_size,
         a.cache_mb,
         a.dir.display()
     );
     println!("| engine | workload | ops | seconds | ops/s | us/op | notes |");
     println!("|---|---|---:|---:|---:|---:|---|");
+    let all = a.workload == "all";
     for &kind in &a.engines {
-        run(kind, &a, &vals);
+        if all || a.workload == "basic" {
+            run(kind, &a, &vals);
+        }
+        if all || a.workload == "update-hot" {
+            update_hot(kind, true, &a, &vals);
+            if kind == EngineKind::PgHeap {
+                update_hot(kind, false, &a, &vals);
+            }
+        }
+        if all || a.workload == "long-snapshot" {
+            long_snapshot(kind, &a, &vals);
+        }
     }
 }

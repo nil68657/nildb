@@ -1,6 +1,6 @@
-// Package nilengine binds NilDB's own storage engines, an LSM tree and a
-// copy-on-write B+ tree written in Rust under rust/, through their C
-// interface (rust/include/nilengine.h).
+// Package nilengine binds NilDB's own storage engines, an LSM tree, a
+// copy-on-write B+ tree and a PostgreSQL-style heap (pgheap) written in Rust
+// under rust/, through their C interface (rust/include/nilengine.h).
 //
 // The binding compiles only with the nilengine build tag, after
 // `make rust-build` has produced rust/target/release/libnilengine.a:
