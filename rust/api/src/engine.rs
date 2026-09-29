@@ -1,11 +1,12 @@
-//! The trait both engines implement. Its operations are the ones
-//! `internal/store` calls on RocksDB today: named column families, atomic
+//! The trait every engine implements. Its operations are the ones
+//! `internal/store` calls on RocksDB: named column families, atomic
 //! multi-family write batches, point and multi-key reads, snapshots, bounded
-//! iterators in both directions, flush, log sync, compact-range and property
-//! reads.
+//! iterators in both directions, flush, log sync, compact-range, property
+//! reads, checkpoints and approximate range sizes.
 
 use std::any::Any;
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::batch::{CfId, WriteBatch};
@@ -176,6 +177,22 @@ pub trait Engine: Send + Sync {
     /// Sequence number (LSM), transaction id (B+ tree) or xid (pgheap) of the
     /// last commit.
     fn latest_sequence(&self) -> u64;
+
+    /// Writes an openable copy of the database into `dir`, which must not
+    /// exist; its parent must. The copy holds every write committed before
+    /// the call started and is a consistent state: the writes of some prefix
+    /// of the commit history, none in part. It is built in `dir` with `.tmp`
+    /// appended and renamed into place, so a crash never leaves a partial
+    /// copy under `dir`. Writers and readers keep running meanwhile.
+    fn checkpoint(&self, dir: &Path) -> Result<()>;
+
+    /// Estimates the bytes each `[start, limit)` range of `cf` takes on disk.
+    /// Both ends are keys; a range with `start >= limit` is 0, and so is a
+    /// range that holds no key. The LSM counts table files only, as RocksDB's
+    /// `GetApproximateSizes` does by default, so data still in memtables adds
+    /// nothing; the B+ tree and pgheap estimate from one root-to-leaf descent
+    /// per end.
+    fn approximate_sizes(&self, cf: CfId, ranges: &[(&[u8], &[u8])]) -> Result<Vec<u64>>;
 
     /// Syncs, stops background work and releases the directory lock. Later
     /// calls fail with `Error::Closed`; a second `close` returns `Ok`.

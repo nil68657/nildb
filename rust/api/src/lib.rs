@@ -6,6 +6,7 @@
 
 pub mod batch;
 pub mod cache;
+pub mod checkpoint;
 pub mod coding;
 pub mod engine;
 pub mod error;

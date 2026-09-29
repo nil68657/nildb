@@ -147,14 +147,27 @@ func infoFields(t *testing.T, text, header string) map[string]string {
 	return out
 }
 
+// sstEngine reports whether the engine keeps table files, which the
+// rocksdb.total-sst-files-size and rocksdb.num-files-at-level<N>
+// properties describe; the B+ tree and pgheap have none.
+func sstEngine(st *store.Store) bool {
+	return st.Engine() == store.EngineRocksDB || st.Engine() == store.EngineLSM
+}
+
 func TestRocksInfoAndProperties(t *testing.T) {
 	e := spawn(t, nil)
 	r2, r3 := e.Client(t, 2), e.Client(t, 3)
+	rocks := e.Store.Engine() == store.EngineRocksDB
 
 	info := asMap(t, do(t, r3, "ROCKS.INFO"))
-	major, minor, patch := store.Version()
-	if want := fmt.Sprintf("%d.%d.%d", major, minor, patch); info["version"] != want {
-		t.Errorf("version = %v, want %s", info["version"], want)
+	if info["version"] != e.Store.EngineVersion() || info["engine"] != e.Store.Engine() {
+		t.Errorf("version = %v, engine = %v; want %s, %s", info["version"], info["engine"], e.Store.EngineVersion(), e.Store.Engine())
+	}
+	if rocks {
+		major, minor, patch := store.Version()
+		if want := fmt.Sprintf("%d.%d.%d", major, minor, patch); info["version"] != want {
+			t.Errorf("version = %v, want the linked RocksDB %s", info["version"], want)
+		}
 	}
 	cfs, _ := info["column_families"].([]any)
 	if got := fmt.Sprint(cfs); got != "[default meta sub zscore doc idx geo col]" {
@@ -168,11 +181,11 @@ func TestRocksInfoAndProperties(t *testing.T) {
 		t.Errorf("RESP2 ROCKS.INFO = %v", flat)
 	}
 	tc := e.TCP(t)
-	if got := string(tc.Do("ROCKS.INFO")); !strings.HasPrefix(got, "*28\r\n$7\r\nversion\r\n") {
+	if got := string(tc.Do("ROCKS.INFO")); !strings.HasPrefix(got, "*30\r\n$7\r\nversion\r\n") {
 		t.Errorf("RESP2 ROCKS.INFO starts %q", got[:min(len(got), 40)])
 	}
 	tc.Do("HELLO", "3")
-	if got := string(tc.Do("ROCKS.INFO")); !strings.HasPrefix(got, "%14\r\n$7\r\nversion\r\n") {
+	if got := string(tc.Do("ROCKS.INFO")); !strings.HasPrefix(got, "%15\r\n$7\r\nversion\r\n") {
 		t.Errorf("RESP3 ROCKS.INFO starts %q", got[:min(len(got), 40)])
 	}
 	if got := string(tc.Do("MULTI")); got != "+OK\r\n" {
@@ -193,7 +206,11 @@ func TestRocksInfoAndProperties(t *testing.T) {
 		t.Errorf("ROCKS.CF LIST = %s", got)
 	}
 	cf := asMap(t, do(t, r3, "ROCKS.CF", "INFO", "META"))
-	for _, name := range []string{"rocksdb.estimate-num-keys", "rocksdb.total-sst-files-size", "rocksdb.num-files-at-level0"} {
+	names := []string{"rocksdb.estimate-num-keys"}
+	if sstEngine(e.Store) {
+		names = append(names, "rocksdb.total-sst-files-size", "rocksdb.num-files-at-level0")
+	}
+	for _, name := range names {
 		if _, ok := cf[name].(int64); !ok {
 			t.Errorf("ROCKS.CF INFO meta lacks %s: %v", name, cf)
 		}
@@ -206,19 +223,38 @@ func TestRocksInfoAndProperties(t *testing.T) {
 		t.Errorf("rocksdb.num-snapshots = %v", v)
 	}
 	intProperty(t, r2, "rocksdb.estimate-num-keys", "meta")
-	if v := do(t, r2, "ROCKS.PROPERTY", "rocksdb.stats").(string); !strings.Contains(v, "DB Stats") {
+	// RocksDB's stats dump has a "DB Stats" block; the Rust engines' has
+	// one "column family" block per family.
+	statsMark := map[bool]string{true: "DB Stats", false: "column family"}[rocks]
+	if v := do(t, r2, "ROCKS.PROPERTY", "rocksdb.stats").(string); !strings.Contains(v, statsMark) {
 		t.Errorf("rocksdb.stats = %q", v)
 	}
 	wantNil(t, r2, "ROCKS.PROPERTY", "rocksdb.no-such-property")
 	wantErr(t, r2, "ERR syntax error", "ROCKS.PROPERTY", "rocksdb.stats", "CF")
 	wantErr(t, r2, "ERR syntax error", "ROCKS.PROPERTY", "rocksdb.stats", "FOO", "meta")
 
-	wantErr(t, r2, "ERR statistics disabled, start with --rocks-stats", "ROCKS.STATS")
-	for _, args := range [][]any{{"ROCKS.FLUSHWAL"}, {"ROCKS.FLUSHWAL", "sync"},
-		{"ROCKS.SETOPTION", "meta", "disable_auto_compactions", "true"},
-		{"ROCKS.SETOPTION", "meta", "disable_auto_compactions", "false"}} {
+	for _, args := range [][]any{{"ROCKS.FLUSHWAL"}, {"ROCKS.FLUSHWAL", "sync"}} {
 		if v := do(t, r2, args...); v != "OK" {
 			t.Errorf("%v = %v", args, v)
+		}
+	}
+	setOpts := [][]any{{"ROCKS.SETOPTION", "meta", "disable_auto_compactions", "true"},
+		{"ROCKS.SETOPTION", "meta", "disable_auto_compactions", "false"}}
+	if rocks {
+		wantErr(t, r2, "ERR statistics disabled, start with --rocks-stats", "ROCKS.STATS")
+		for _, args := range setOpts {
+			if v := do(t, r2, args...); v != "OK" {
+				t.Errorf("%v = %v", args, v)
+			}
+		}
+	} else {
+		// The Rust engines keep their counters without --rocks-stats and
+		// have no mutable column family options.
+		if s := do(t, r2, "ROCKS.STATS").(string); !strings.Contains(s, "column family") {
+			t.Errorf("ROCKS.STATS = %q", s)
+		}
+		for _, args := range setOpts {
+			wantErr(t, r2, "ERR not supported with --engine "+e.Store.Engine(), args...)
 		}
 	}
 	wantErr(t, r2, "ERR syntax error", "ROCKS.FLUSHWAL", "NOW")
@@ -232,7 +268,11 @@ func TestRocksStatsEnabled(t *testing.T) {
 	e := spawn(t, func(c *config.Config) { c.RocksStats = true })
 	r2 := e.Client(t, 2)
 	do(t, r2, "SET", "k", "v")
-	if s := do(t, r2, "ROCKS.STATS").(string); !strings.Contains(s, "rocksdb.") {
+	want := "rocksdb."
+	if e.Store.Engine() != store.EngineRocksDB {
+		want = "column family"
+	}
+	if s := do(t, r2, "ROCKS.STATS").(string); !strings.Contains(s, want) {
 		t.Errorf("ROCKS.STATS = %q", s)
 	}
 	if info := pairs(t, do(t, r2, "ROCKS.INFO")); info["statistics"] != "yes" {
@@ -382,7 +422,7 @@ func TestRocksCheckpointReadOnly(t *testing.T) {
 		t.Errorf("INFO persistence = %v", persistence)
 	}
 
-	ro, err := store.OpenReadOnly(store.Config{Dir: dir, BlockCacheBytes: 8 << 20, AnalyticsCacheBytes: 8 << 20, WriteBufferBytes: 16 << 20})
+	ro, err := store.OpenReadOnly(store.Config{Dir: dir, Engine: e.Store.Engine(), BlockCacheBytes: 8 << 20, AnalyticsCacheBytes: 8 << 20, WriteBufferBytes: 16 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,17 +443,24 @@ func TestRocksCheckpointReadOnly(t *testing.T) {
 		t.Fatalf("ROCKS.FLUSH = %v", v)
 	}
 	exp := filepath.Join(t.TempDir(), "export")
-	if res := asMap(t, do(t, r3, "ROCKS.CHECKPOINT", exp, "CF", "meta")); res["cf"] != "meta" || res["dir"] != exp {
-		t.Errorf("export = %v", res)
-	}
-	files, _ := filepath.Glob(filepath.Join(exp, "*.sst"))
-	if len(files) == 0 {
-		t.Fatalf("export of meta wrote no SST files")
-	}
-	// Default ingestion options refuse files RocksDB itself generated.
-	wantErr(t, r2, "ERR ", "ROCKS.INGEST", "meta", files[0])
-	if persistence := infoFields(t, do(t, r2, "INFO", "persistence").(string), "# Persistence"); persistence["nildb_last_checkpoint_cf"] != "meta" {
-		t.Errorf("INFO persistence after export = %v", persistence)
+	if e.Store.Engine() == store.EngineRocksDB {
+		if res := asMap(t, do(t, r3, "ROCKS.CHECKPOINT", exp, "CF", "meta")); res["cf"] != "meta" || res["dir"] != exp {
+			t.Errorf("export = %v", res)
+		}
+		files, _ := filepath.Glob(filepath.Join(exp, "*.sst"))
+		if len(files) == 0 {
+			t.Fatalf("export of meta wrote no SST files")
+		}
+		// Default ingestion options refuse files RocksDB itself generated.
+		wantErr(t, r2, "ERR ", "ROCKS.INGEST", "meta", files[0])
+		if persistence := infoFields(t, do(t, r2, "INFO", "persistence").(string), "# Persistence"); persistence["nildb_last_checkpoint_cf"] != "meta" {
+			t.Errorf("INFO persistence after export = %v", persistence)
+		}
+	} else {
+		// Exporting and ingesting SST files are RocksDB's.
+		unsupported := "ERR not supported with --engine " + e.Store.Engine()
+		wantErr(t, r2, unsupported, "ROCKS.CHECKPOINT", exp, "CF", "meta")
+		wantErr(t, r2, unsupported, "ROCKS.INGEST", "meta", filepath.Join(dir, "missing.sst"))
 	}
 	wantErr(t, r2, "ERR syntax error", "ROCKS.CHECKPOINT", exp+"2", "FOO", "meta")
 	wantErr(t, r2, "ERR unknown column family 'nope'", "ROCKS.CHECKPOINT", exp+"2", "CF", "nope")
@@ -449,15 +496,20 @@ func TestRocksCompactShrinksEstimate(t *testing.T) {
 		do(t, r2, args...)
 	}
 	do(t, r2, "ROCKS.FLUSH", "CF", "meta")
-	sstBefore := intProperty(t, r2, "rocksdb.total-sst-files-size", "meta")
+	var sstBefore int64
+	if sstEngine(e.Store) {
+		sstBefore = intProperty(t, r2, "rocksdb.total-sst-files-size", "meta")
+	}
 	if v := do(t, r2, "ROCKS.COMPACT", "CF", "meta"); v != "OK" {
 		t.Fatalf("ROCKS.COMPACT = %v", v)
 	}
 	if got := intProperty(t, r2, "rocksdb.estimate-num-keys", "meta"); got >= full/10 {
 		t.Errorf("estimate-num-keys after deletes and compaction = %d, was %d", got, full)
 	}
-	if got := intProperty(t, r2, "rocksdb.total-sst-files-size", "meta"); got >= sstBefore {
-		t.Errorf("total-sst-files-size %d after compaction, %d before", got, sstBefore)
+	if sstEngine(e.Store) {
+		if got := intProperty(t, r2, "rocksdb.total-sst-files-size", "meta"); got >= sstBefore {
+			t.Errorf("total-sst-files-size %d after compaction, %d before", got, sstBefore)
+		}
 	}
 
 	for _, args := range [][]any{{"ROCKS.COMPACT"}, {"ROCKS.COMPACT", "CF", "sub", "FROM", "00", "TO", "01"},
@@ -480,7 +532,7 @@ func TestInfoRocksdbParses(t *testing.T) {
 	do(t, r2, "SET", "a", "1")
 	text := do(t, r2, "INFO", "rocksdb").(string)
 	f := infoFields(t, text, "# Rocksdb")
-	if f["rocksdb_version"] != version() {
+	if f["rocksdb_version"] != e.Store.EngineVersion() {
 		t.Errorf("rocksdb_version = %q", f["rocksdb_version"])
 	}
 	if f["rocksdb_column_families"] != "default,meta,sub,zscore,doc,idx,geo,col" {

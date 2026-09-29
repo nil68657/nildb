@@ -39,10 +39,10 @@ type iterator struct {
 	check bool
 }
 
-// newIter builds an iterator over live state, over the snapshot h when it
-// is non-nil, or over wb merged with live state when wb is non-nil.
-func (s *Store) newIter(cf CF, lo, hi []byte, o IterOpts, h *snapHandle, wb *grocksdb.WriteBatchWI) Iterator {
-	cfh := s.handle(cf)
+// newIterator builds an iterator over live state, over snap when it is
+// non-nil, or over wb merged with live state when wb is non-nil.
+func (k *rocksKV) newIterator(cf CF, lo, hi []byte, o IterOpts, snap *grocksdb.Snapshot, wb *grocksdb.WriteBatchWI) Iterator {
+	cfh := k.h(cf)
 	i := &iterator{lo: cloneBound(lo), hi: cloneBound(hi), check: wb != nil}
 	ro := grocksdb.NewDefaultReadOptions()
 	i.ro = ro
@@ -75,25 +75,17 @@ func (s *Store) newIter(cf CF, lo, hi []byte, o IterOpts, h *snapHandle, wb *gro
 	}
 
 	switch {
-	case h != nil:
-		h.mu.RLock()
-		if h.released {
-			h.mu.RUnlock()
-			i.err = ErrLeaseExpired
-			i.Close()
-			return i
-		}
+	case snap != nil:
 		// The iterator reads the sequence number at creation, so the
 		// snapshot may be released while it stays open.
-		ro.SetSnapshot(h.snap)
-		i.it = s.db.NewIteratorCF(ro, cfh)
-		h.mu.RUnlock()
+		ro.SetSnapshot(snap)
+		i.it = k.db.NewIteratorCF(ro, cfh)
 	case wb != nil:
-		base := s.db.NewIteratorCF(ro, cfh)
+		base := k.db.NewIteratorCF(ro, cfh)
 		// The returned iterator owns base and destroys it on Close.
-		i.it = wb.NewIteratorWithBaseCFReadOpts(s.db, base, cfh, ro)
+		i.it = wb.NewIteratorWithBaseCFReadOpts(k.db, base, cfh, ro)
 	default:
-		i.it = s.db.NewIteratorCF(ro, cfh)
+		i.it = k.db.NewIteratorCF(ro, cfh)
 	}
 	return i
 }
@@ -195,8 +187,7 @@ func (i *iterator) Value() []byte {
 }
 
 // Err returns the iterator's error: RocksDB's (TimedOut after Deadline,
-// corruption, I/O) or ErrLeaseExpired / ErrClosed for an iterator that
-// could not open.
+// corruption, I/O).
 func (i *iterator) Err() error {
 	if i.err != nil {
 		return i.err

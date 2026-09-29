@@ -136,10 +136,12 @@ func TestSubFilter(t *testing.T) {
 	txn.Delete(CFMeta, layout.VersionKey(nil, vs[0].v))
 	txn.Put(CFSub, layout.SubKey(nil, vs[1].v, []byte("late")), []byte("x"))
 	commit(t, txn)
-	for i := range 64 { // push every cache slot to another version
-		s.subF.cache[i].mu.Lock()
-		s.subF.cache[i].valid = false
-		s.subF.cache[i].mu.Unlock()
+	if k, ok := s.kv.(*rocksKV); ok {
+		for i := range 64 { // push every cache slot to another version
+			k.subF.cache[i].mu.Lock()
+			k.subF.cache[i].valid = false
+			k.subF.cache[i].mu.Unlock()
+		}
 	}
 	flushCompact(t, s, CFMeta, CFSub)
 	wantAbsent(t, s, CFSub, layout.SubKey(nil, vs[0].v, []byte{0, 'm'}))

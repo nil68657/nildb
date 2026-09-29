@@ -16,6 +16,7 @@ import (
 // calls in flight at once. Run it under -race. Afterwards dead versions
 // are gone and live ones intact.
 func TestFilterRace(t *testing.T) {
+	rocksOnly(t, "runs RocksDB subcompactions against the shared filter; the sweeper has no shared state")
 	old := maxSubcompactions
 	maxSubcompactions = 4
 	defer func() { maxSubcompactions = old }()

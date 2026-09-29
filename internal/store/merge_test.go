@@ -44,14 +44,28 @@ func TestMergeI64Add(t *testing.T) {
 	commit(t, txn)
 	wantCount(999)
 
-	// A malformed operand fails the read instead of producing a number.
+	// A malformed operand never produces a number. RocksDB stores operands
+	// and fails the read; the Rust engines resolve merges at commit and
+	// fail the write, applying none of the batch.
 	bad := layout.CountKey(43)
 	txn = s.Begin()
+	txn.Put(CFDefault, layout.CountKey(44), layout.AppendCount(nil, 1))
 	txn.Merge(CFDefault, bad, []byte{1, 2, 3})
-	commit(t, txn)
-	if _, _, err := s.Get(CFDefault, bad); err == nil {
-		t.Fatal("Get over a malformed merge operand succeeded")
+	err := txn.Commit()
+	if s.Engine() == EngineRocksDB {
+		if err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if _, _, err := s.Get(CFDefault, bad); err == nil {
+			t.Fatal("Get over a malformed merge operand succeeded")
+		}
+		return
 	}
+	if err == nil {
+		t.Fatal("Commit of a malformed merge operand succeeded")
+	}
+	wantAbsent(t, s, CFDefault, bad)
+	wantAbsent(t, s, CFDefault, layout.CountKey(44))
 }
 
 func TestI64AddOperator(t *testing.T) {

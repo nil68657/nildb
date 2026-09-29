@@ -268,6 +268,8 @@ func (s *Server) infoServer(b *strings.Builder) {
 	field(b, "config_file", "")
 	field(b, "io_threads_active", 0)
 	field(b, "nildb_rocksdb_version", fmt.Sprintf("%d.%d.%d", major, minor, patch))
+	field(b, "nildb_engine", s.st.Engine())
+	field(b, "nildb_engine_version", s.st.EngineVersion())
 	field(b, "nildb_go_version", runtime.Version())
 }
 

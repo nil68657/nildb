@@ -82,6 +82,8 @@ macro_rules! conformance_tests {
             crash_partial_unsynced_seed_2,
             crash_partial_unsynced_seed_3,
             crash_after_reopen_cycles,
+            checkpoint_is_a_consistent_copy,
+            approximate_sizes_follow_the_data,
         );
     };
     (@cases $harness:expr; $($case:ident),* $(,)?) => {

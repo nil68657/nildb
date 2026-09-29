@@ -19,24 +19,28 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/nil68657/nildb/internal/store"
 )
 
 // nildbBinary returns $NILDB_BIN (bin/nildb from make build) or builds
-// this package into a temporary directory.
-func nildbBinary(t *testing.T) string {
+// this package into a temporary directory with this test binary's build
+// tags.
+func nildbBinary(t testing.TB) string {
 	t.Helper()
 	if bin := os.Getenv("NILDB_BIN"); bin != "" {
 		return bin
 	}
 	bin := filepath.Join(t.TempDir(), "nildb")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+	args := append(append([]string{"build"}, buildArgs(t)...), "-o", bin, ".")
+	if out, err := exec.Command("go", args...).CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	return bin
 }
 
 // freeAddr returns a loopback address whose port was free a moment ago.
-func freeAddr(t *testing.T) string {
+func freeAddr(t testing.TB) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -71,11 +75,13 @@ type proc struct {
 	err    error // set before exited closes
 }
 
-// start runs bin on addr with args and waits until it accepts
-// connections. Cleanup kills it if the test did not stop it.
-func start(t *testing.T, bin, addr string, args ...string) *proc {
+// start runs bin on addr with the test engine (store.TestEngine) and args,
+// and waits until it accepts connections. Cleanup kills it if the test
+// did not stop it.
+func start(t testing.TB, bin, addr string, args ...string) *proc {
 	t.Helper()
-	p := &proc{cmd: exec.Command(bin, append([]string{"--addr", addr}, args...)...), exited: make(chan struct{})}
+	args = append([]string{"--addr", addr, "--engine", store.TestEngine()}, args...)
+	p := &proc{cmd: exec.Command(bin, args...), exited: make(chan struct{})}
 	p.cmd.Stdout, p.cmd.Stderr = &p.out, &p.out
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -110,7 +116,7 @@ func start(t *testing.T, bin, addr string, args ...string) *proc {
 }
 
 // stop sends sig and waits for a zero exit status. It returns the log.
-func (p *proc) stop(t *testing.T, sig os.Signal) string {
+func (p *proc) stop(t testing.TB, sig os.Signal) string {
 	t.Helper()
 	if err := p.cmd.Process.Signal(sig); err != nil {
 		t.Fatal(err)
@@ -167,7 +173,7 @@ func TestBinaryEndToEnd(t *testing.T) {
 	rdb.Close()
 	logs := p.stop(t, syscall.SIGTERM)
 	last := -1
-	for _, want := range []string{"nildb: listening on " + addr, "nildb: shutting down", "nildb: stopped"} {
+	for _, want := range []string{"nildb: listening on " + addr, ", engine " + store.TestEngine() + " ", "nildb: shutting down", "nildb: stopped"} {
 		i := strings.Index(logs, want)
 		if i <= last {
 			t.Errorf("log lacks %q after the previous line:\n%s", want, logs)

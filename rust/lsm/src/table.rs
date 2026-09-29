@@ -26,7 +26,7 @@ use nilengine_api::{Error, IoContext, Options, Result};
 use crate::block::{Block, BlockBuilder, BlockIter};
 use crate::filter;
 use crate::iter::InternalIterator;
-use crate::key::{KIND_DELETE, parse_trailer, user_key};
+use crate::key::{KIND_DELETE, KIND_SEEK, MAX_SEQ, make_internal, parse_trailer, user_key};
 
 const FOOTER_LEN: usize = 56;
 const FORMAT_VERSION: u32 = 1;
@@ -197,6 +197,8 @@ pub struct Table {
     path: PathBuf,
     number: u64,
     size: u64,
+    /// Offset of the filter block, where the data blocks end.
+    data_end: u64,
     index: Arc<Block>,
     filter: Vec<u8>,
     cache: Arc<BlockCache>,
@@ -252,10 +254,27 @@ impl Table {
             path: path.to_path_buf(),
             number,
             size,
+            data_end: foff,
             index,
             filter,
             cache,
         })
+    }
+
+    /// Offset in the file of the data block that holds the first entry of
+    /// `user` or later: the block the index points at, or the end of the
+    /// data blocks when every key sorts below `user` (RocksDB's
+    /// `ApproximateOffsetOf`). The difference of two offsets estimates the
+    /// bytes of a key range at block granularity.
+    pub fn approximate_offset(&self, user: &[u8]) -> Result<u64> {
+        let mut idx = self.index.clone().iter();
+        idx.seek(&make_internal(user, MAX_SEQ, KIND_SEEK));
+        idx.status()?;
+        if !idx.valid() {
+            return Ok(self.data_end);
+        }
+        let (off, _) = decode_handle(idx.value())?;
+        Ok(off.min(self.data_end))
     }
 
     fn read_block(&self, off: u64, len: u64, fill: bool) -> Result<Arc<Block>> {

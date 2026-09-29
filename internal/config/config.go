@@ -28,13 +28,23 @@ const (
 	FsyncNo       = "no"
 )
 
+// Storage engines for Config.Engine. The three Rust engines need a binary
+// built with -tags nilengine (make build-engines).
+const (
+	EngineRocksDB = "rocksdb"
+	EngineLSM     = "lsm"
+	EngineBTree   = "btree"
+	EnginePgHeap  = "pgheap"
+)
+
 // Databases is the number of Redis databases. SELECT takes 0..15 and the
 // value is fixed in v1.
 const Databases = 16
 
 // Config is the full server configuration.
 type Config struct {
-	Dir          string // RocksDB directory
+	Dir          string // data directory
+	Engine       string // EngineRocksDB, EngineLSM, EngineBTree or EnginePgHeap
 	Addr         string // listen address, host:port
 	RequirePass  string // password of the default user; empty means no AUTH
 	Fsync        string // FsyncAlways, FsyncEverySec or FsyncNo
@@ -71,6 +81,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Dir:                    "./data",
+		Engine:                 EngineRocksDB,
 		Addr:                   "127.0.0.1:6380",
 		Fsync:                  FsyncEverySec,
 		Databases:              Databases,

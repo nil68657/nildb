@@ -280,6 +280,56 @@ func TestSnapshotsAndReopen(t *testing.T) {
 	})
 }
 
+func TestCheckpointAndApproximateSizes(t *testing.T) {
+	forEach(t, func(t *testing.T, kind Kind, dir string) {
+		db := mustOpen(t, kind, dir, cfs)
+		defer db.Close()
+		write(t, db, func(b *Batch) {
+			for i := range 1000 {
+				b.Put(1, key(i), bytes.Repeat([]byte("v"), 100))
+			}
+		})
+		if err := db.Flush(); err != nil { // the LSM counts table files only
+			t.Fatal(err)
+		}
+		sizes, err := db.ApproximateSizes(1, [][2][]byte{
+			{key(0), key(1000)}, {key(0), key(500)}, {[]byte("zz"), []byte("zzz")}, {key(9), key(1)}, {nil, nil},
+		})
+		if err != nil || len(sizes) != 5 {
+			t.Fatalf("ApproximateSizes = %v, %v", sizes, err)
+		}
+		if sizes[0] == 0 || sizes[1] == 0 || sizes[1] > sizes[0] || sizes[2] != 0 || sizes[3] != 0 || sizes[4] != 0 {
+			t.Fatalf("ApproximateSizes = %v", sizes)
+		}
+		if got, err := db.ApproximateSizes(1, nil); err != nil || len(got) != 0 {
+			t.Fatalf("ApproximateSizes(nil) = %v, %v", got, err)
+		}
+		if _, err := db.ApproximateSizes(7, [][2][]byte{{key(0), key(1)}}); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("ApproximateSizes on cf 7: %v", err)
+		}
+
+		cp := t.TempDir() + "/cp"
+		if err := db.Checkpoint(cp); err != nil {
+			t.Fatal(err)
+		}
+		write(t, db, func(b *Batch) { b.Put(1, []byte("after"), []byte("x")) })
+		if err := db.Checkpoint(cp); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("second Checkpoint into %s: %v", cp, err)
+		}
+		if err := db.Checkpoint(t.TempDir() + "/missing/cp"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Checkpoint under a missing parent: %v", err)
+		}
+		c := mustOpen(t, kind, cp, cfs)
+		defer c.Close()
+		if v, ok := mustGet(t, c, nil, 1, key(999)); !ok || len(v) != 100 {
+			t.Fatalf("checkpoint Get = %q, %v", v, ok)
+		}
+		if _, ok := mustGet(t, c, nil, 1, []byte("after")); ok {
+			t.Fatal("the checkpoint holds a write made after it")
+		}
+	})
+}
+
 func TestOpenErrors(t *testing.T) {
 	dir := t.TempDir()
 	db := mustOpen(t, LSM, dir, cfs)

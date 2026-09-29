@@ -189,6 +189,12 @@ impl MemTable {
         self.next_wal_number.load(atomic::Ordering::Acquire)
     }
 
+    /// Puts plus deletes recorded for column family `cf`.
+    pub fn entries_for(&self, cf: u32) -> u64 {
+        let a = self.arena.lock().unwrap();
+        a.counts.get(&cf).map_or(0, |&(p, d)| p + d)
+    }
+
     /// Puts minus deletes recorded for column family `cf`.
     pub fn live_estimate(&self, cf: u32) -> i64 {
         let a = self.arena.lock().unwrap();

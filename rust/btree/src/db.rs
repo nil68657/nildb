@@ -17,13 +17,14 @@
 //! chosen tree does not reach.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use nilengine_api::{
     BatchOp, CfId, CrashMode, DbIterator, Engine, EngineKind, Error, IoContext, IterOptions,
-    Options, Result, Snapshot, WriteBatch, WriteOptions, i64add,
+    Options, Result, Snapshot, WriteBatch, WriteOptions, checkpoint, i64add,
 };
 
 use crate::cursor::Cursor;
@@ -497,6 +498,96 @@ impl Inner {
         Ok(())
     }
 
+    /// Writes an openable copy into `dir`. The tree current under the writer
+    /// lock is held for the whole copy, which keeps every page it reaches
+    /// from being freed and reused. The data file is copied (cloned on
+    /// APFS); later commits may have written other pages and new meta pages
+    /// meanwhile, so the copy is cut to the held tree's page count and both
+    /// of its meta pages are rewritten to name the held tree's roots.
+    fn checkpoint(&self, dir: &Path) -> Result<()> {
+        self.check_open()?;
+        let tmp = checkpoint::begin(dir)?;
+        let res = self
+            .checkpoint_into(&tmp)
+            .and_then(|()| checkpoint::finish(&tmp, dir));
+        if res.is_err() {
+            checkpoint::abandon(&tmp);
+        }
+        res
+    }
+
+    fn checkpoint_into(&self, tmp: &Path) -> Result<()> {
+        let (state, names) = {
+            let w = self.writer.lock().unwrap();
+            if let Some(e) = &w.poisoned {
+                return Err(e.clone());
+            }
+            (self.current(), w.cf_names.clone())
+        };
+        let dst = data_path(tmp);
+        checkpoint::copy_synced(self.pager.path(), &dst)?;
+        let meta = Meta {
+            txn: state.txn,
+            page_size: self.page_size as u32,
+            num_pages: state.num_pages,
+            cfs: meta_cfs(&names, &state.roots),
+        };
+        let ps = self.page_size as u64;
+        let (m0, m1) = (meta.encode(0)?, meta.encode(1)?);
+        let f = OpenOptions::new()
+            .write(true)
+            .open(&dst)
+            .ctx(|| format!("open {}", dst.display()))?;
+        f.set_len(state.num_pages * ps)
+            .and_then(|()| f.write_all_at(&m0, 0))
+            .and_then(|()| f.write_all_at(&m1, ps))
+            .and_then(|()| f.sync_data())
+            .ctx(|| format!("write the meta pages of {}", dst.display()))?;
+        drop(state);
+        Ok(())
+    }
+
+    /// For each range: 0 when a cursor finds no key in it; otherwise the
+    /// share of the tree's keys between the two ends from `rank_estimate`,
+    /// times the key count and the average entry size of the two leaves the
+    /// descents reached.
+    fn approximate_sizes(&self, cf: CfId, ranges: &[(&[u8], &[u8])]) -> Result<Vec<u64>> {
+        self.check_open()?;
+        let icf = self.icf(cf)?;
+        let state = self.current();
+        let root = state.roots[icf];
+        ranges
+            .iter()
+            .map(|&(start, limit)| {
+                if start >= limit || root.keys == 0 {
+                    return Ok(0);
+                }
+                let mut c = Cursor::new(
+                    self.pager.clone(),
+                    state.clone(),
+                    icf,
+                    Some(start.to_vec()),
+                    Some(limit.to_vec()),
+                    false,
+                );
+                c.seek_to_first();
+                c.status()?;
+                if !c.valid() {
+                    return Ok(0);
+                }
+                let (fa, ba) = tree::rank_estimate(&self.pager, &root, start)?;
+                let (fb, bb) = tree::rank_estimate(&self.pager, &root, limit)?;
+                let avg = if ba > 0.0 && bb > 0.0 {
+                    (ba + bb) / 2.0
+                } else {
+                    ba.max(bb)
+                };
+                let est = (fb - fa).max(0.0) * root.keys as f64 * avg;
+                Ok((est as u64).max(1))
+            })
+            .collect()
+    }
+
     fn depth(&self, root: &Root) -> Result<usize> {
         if root.page == 0 {
             return Ok(0);
@@ -694,6 +785,14 @@ impl Engine for BTreeEngine {
 
     fn latest_sequence(&self) -> u64 {
         self.inner.current().txn
+    }
+
+    fn checkpoint(&self, dir: &Path) -> Result<()> {
+        self.inner.checkpoint(dir)
+    }
+
+    fn approximate_sizes(&self, cf: CfId, ranges: &[(&[u8], &[u8])]) -> Result<Vec<u64>> {
+        self.inner.approximate_sizes(cf, ranges)
     }
 
     fn close(&self) -> Result<()> {

@@ -515,6 +515,75 @@ func (db *DB) Property(cf int, name string) (val string, ok bool) {
 	return val, ok
 }
 
+// Checkpoint writes an openable copy of the database into dir, which must
+// not exist (ErrInvalidArgument) and whose parent must (ErrNotFound). The
+// copy holds every write committed before the call and is a consistent
+// prefix of the commit history.
+func (db *DB) Checkpoint(dir string) error {
+	cdir := C.CString(dir)
+	defer C.free(unsafe.Pointer(cdir))
+	return db.with(func(c *C.nil_db) error {
+		var cerr *C.char
+		C.nil_checkpoint(c, cdir, &cerr)
+		return takeErr(cerr)
+	})
+}
+
+// ApproximateSizes estimates the on-disk bytes of each [lo, hi) range of cf;
+// both ends are keys, and an empty or reversed range is 0. The LSM counts
+// table files only, as RocksDB's GetApproximateSizes does.
+func (db *DB) ApproximateSizes(cf int, ranges [][2][]byte) ([]uint64, error) {
+	out := make([]uint64, len(ranges))
+	if len(ranges) == 0 {
+		return out, nil
+	}
+	err := db.with(func(c *C.nil_db) error {
+		// As in MultiGet, the keys and the pointer arrays live in C memory:
+		// starts in the first half of each array, limits in the second.
+		n := len(ranges)
+		total := 0
+		for _, r := range ranges {
+			total += len(r[0]) + len(r[1])
+		}
+		ptrSize := unsafe.Sizeof(uintptr(0))
+		lenSize := unsafe.Sizeof(C.size_t(0))
+		buf := C.malloc(C.size_t(total) + 1)
+		ptrs := C.malloc(C.size_t(2*n) * C.size_t(ptrSize))
+		lens := C.malloc(C.size_t(2*n) * C.size_t(lenSize))
+		sizes := C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.uint64_t(0))))
+		defer func() {
+			for _, p := range []unsafe.Pointer{buf, ptrs, lens, sizes} {
+				C.free(p)
+			}
+		}()
+		b := unsafe.Slice((*byte)(buf), total+1)
+		pa := unsafe.Slice((**C.char)(ptrs), 2*n)
+		la := unsafe.Slice((*C.size_t)(lens), 2*n)
+		off := 0
+		for i, r := range ranges {
+			for j, k := range r {
+				copy(b[off:], k)
+				pa[j*n+i] = (*C.char)(unsafe.Add(buf, off))
+				la[j*n+i] = C.size_t(len(k))
+				off += len(k)
+			}
+		}
+		var cerr *C.char
+		C.nil_approximate_sizes(c, C.uint32_t(cf), C.size_t(n),
+			(**C.char)(ptrs), (*C.size_t)(lens),
+			(**C.char)(unsafe.Add(ptrs, uintptr(n)*ptrSize)), (*C.size_t)(unsafe.Add(lens, uintptr(n)*lenSize)),
+			(*C.uint64_t)(sizes), &cerr)
+		if e := takeErr(cerr); e != nil {
+			return e
+		}
+		for i, v := range unsafe.Slice((*C.uint64_t)(sizes), n) {
+			out[i] = uint64(v)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // LatestSeq returns the sequence number (LSM), transaction id (B+ tree) or
 // xid (pgheap) of the last commit.
 func (db *DB) LatestSeq() uint64 {

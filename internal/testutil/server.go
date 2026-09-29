@@ -36,16 +36,18 @@ type Env struct {
 }
 
 // Spawn starts a server for the test. The configuration starts from
-// config.Default() with Dir in t.TempDir(), Addr 127.0.0.1:0, an
+// config.Default() with Dir in t.TempDir(), the engine $NILDB_TEST_ENGINE
+// names (store.TestEngine, rocksdb when unset), Addr 127.0.0.1:0, an
 // OffsetClock, NIL.DEBUG enabled and small caches; mutate may change any
 // of it before validation. regs register the command packages under
-// test. Spawn fails the test on any error. Tests that use it open
-// RocksDB, so they should skip under -short.
+// test. Spawn fails the test on any error. Tests that use it open the
+// engine, so they should skip under -short.
 func Spawn(t testing.TB, mutate func(*config.Config), regs ...RegisterFunc) *Env {
 	t.Helper()
 	clock := &config.OffsetClock{}
 	cfg := config.Default()
 	cfg.Dir = t.TempDir()
+	cfg.Engine = store.TestEngine()
 	cfg.Addr = "127.0.0.1:0"
 	cfg.Clock = clock
 	cfg.EnableDebugCommands = true
@@ -65,6 +67,7 @@ func Spawn(t testing.TB, mutate func(*config.Config), regs ...RegisterFunc) *Env
 
 	st, err := store.Open(store.Config{
 		Dir:                 cfg.Dir,
+		Engine:              cfg.Engine,
 		BlockCacheBytes:     cfg.BlockCacheBytes(),
 		AnalyticsCacheBytes: cfg.AnalyticsCacheBytes(),
 		WriteBufferBytes:    cfg.WriteBufferBytes(),

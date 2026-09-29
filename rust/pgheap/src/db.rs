@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use nilengine_api::coding::{get_u32, get_u64};
 use nilengine_api::{
     BatchOp, CfId, CrashMode, DbIterator, Engine, EngineKind, Error, IoContext, IterOptions,
-    Options, Result, Snapshot, WriteBatch, WriteOptions, i64add,
+    Options, Result, Snapshot, WriteBatch, WriteOptions, checkpoint, i64add,
 };
 
 use crate::btree::{Index, MAX_KEY_LEN};
@@ -778,6 +778,11 @@ impl Inner {
     /// after the redo pointer logs a full-page image first.
     pub(crate) fn checkpoint(&self, shutdown: bool) -> Result<()> {
         let _g = self.ckpt.lock().unwrap();
+        self.checkpoint_locked(shutdown)
+    }
+
+    /// The body of `checkpoint`; the caller holds the checkpoint lock.
+    fn checkpoint_locked(&self, shutdown: bool) -> Result<()> {
         // `crash` models a power loss, which stops a running checkpoint
         // between two writes instead of letting it finish and sync.
         let halted = || self.halt.load(Ordering::Acquire);
@@ -832,6 +837,80 @@ impl Inner {
         let mut st = self.bg.state.lock().unwrap();
         st.checkpoint = true;
         self.bg.cv.notify_all();
+    }
+
+    /// Writes an openable copy into `dir`, a base backup in PostgreSQL's
+    /// terms. It runs a checkpoint and, still holding the checkpoint lock so
+    /// that no later checkpoint moves the redo pointer or removes WAL,
+    /// copies `pg_control`, the catalog, the relation files and the commit
+    /// log, then the WAL. Writers keep running, so a page can change while
+    /// its file is copied. Every change after the redo pointer is in the
+    /// WAL, which is copied last, and the first change to each page carries
+    /// a full-page image. The copied `pg_control` says the database was
+    /// running, so opening the copy replays the WAL from the redo pointer,
+    /// restores any page caught half-written from its image, and keeps
+    /// exactly the transactions whose commit records the copy holds.
+    fn base_backup(&self, dir: &Path) -> Result<()> {
+        self.check_open()?;
+        let tmp = checkpoint::begin(dir)?;
+        let res = self
+            .copy_files(&tmp)
+            .and_then(|()| checkpoint::finish(&tmp, dir));
+        if res.is_err() {
+            checkpoint::abandon(&tmp);
+        }
+        res
+    }
+
+    fn copy_files(&self, tmp: &Path) -> Result<()> {
+        let _g = self.ckpt.lock().unwrap();
+        self.checkpoint_locked(false)?;
+        for name in ["pg_control", "catalog"] {
+            checkpoint::copy_synced(&self.dir.join(name), &tmp.join(name))?;
+        }
+        for sub in ["base", "pg_xact", "pg_wal"] {
+            let (src, dst) = (self.dir.join(sub), tmp.join(sub));
+            fs::create_dir(&dst).ctx(|| format!("create {}", dst.display()))?;
+            if sub == "pg_wal" {
+                self.wal.write()?;
+            }
+            let mut names = Vec::new();
+            for e in fs::read_dir(&src).ctx(|| format!("list {}", src.display()))? {
+                let e = e.ctx(|| format!("list {}", src.display()))?;
+                if e.file_type()
+                    .ctx(|| format!("stat {}", e.path().display()))?
+                    .is_file()
+                {
+                    names.push(e.file_name());
+                }
+            }
+            names.sort();
+            for n in names {
+                checkpoint::copy_synced(&src.join(&n), &dst.join(&n))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// For each range: 0 when the index holds no entry in it; otherwise the
+    /// share of index entries between the two ends, from one descent per
+    /// end, times the bytes of the column family's heap and TOAST heap.
+    fn approximate_sizes(&self, cf: CfId, ranges: &[(&[u8], &[u8])]) -> Result<Vec<u64>> {
+        self.check_open()?;
+        let r = &self.rels[self.icf(cf)?];
+        let bytes = (self.pool.fork_bytes(r.heap.rel, FORK_MAIN)
+            + self.pool.fork_bytes(r.toast.rel, FORK_MAIN)) as f64;
+        ranges
+            .iter()
+            .map(|&(start, limit)| {
+                if start >= limit || !r.index.has_entries(&self.pool, start, limit)? {
+                    return Ok(0);
+                }
+                let fa = r.index.rank_fraction(&self.pool, start)?;
+                let fb = r.index.rank_fraction(&self.pool, limit)?;
+                Ok((((fb - fa).max(0.0) * bytes) as u64).max(1))
+            })
+            .collect()
     }
 
     fn start_bg(self: &Arc<Self>) {
@@ -1709,6 +1788,14 @@ impl Engine for PgHeapEngine {
 
     fn latest_sequence(&self) -> u64 {
         self.inner.xact.latest_committed()
+    }
+
+    fn checkpoint(&self, dir: &Path) -> Result<()> {
+        self.inner.base_backup(dir)
+    }
+
+    fn approximate_sizes(&self, cf: CfId, ranges: &[(&[u8], &[u8])]) -> Result<Vec<u64>> {
+        self.inner.approximate_sizes(cf, ranges)
     }
 
     fn close(&self) -> Result<()> {

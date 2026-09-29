@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nil68657/nildb/internal/store"
 )
 
 // Cases ported from Redis 7.2 tests/unit/keyspace.tcl.
@@ -214,8 +216,17 @@ func TestKeysLongKeyAndPatterns(t *testing.T) {
 	c.is(okr, "SET", strings.Repeat("a", 40), "1")
 	c.is(bulks(), "KEYS", "a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b")
 	c.is(okr, "FLUSHDB")
-	c.is(okr, "SET", strings.Repeat("a", 50000), "1")
-	c.is(bulks(), "KEYS", strings.Repeat("*?", 50000))
+	t.Run("50000-byte key", func(t *testing.T) {
+		c := dial(t, e, 2)
+		if eng := store.TestEngine(); eng == store.EngineBTree || eng == store.EnginePgHeap {
+			// The engine refuses the write whole and the server carries on.
+			c.hasPrefix("-ERR nilengine: invalid-argument: key of 50001 bytes exceeds this engine's limit", "SET", strings.Repeat("a", 50000), "1")
+			c.is(st("PONG"), "PING")
+			t.Skipf("engine %s takes keys up to 981 bytes (B+ tree, 4 KiB pages) or 2,000 (pgheap)", eng)
+		}
+		c.is(okr, "SET", strings.Repeat("a", 50000), "1")
+		c.is(bulks(), "KEYS", strings.Repeat("*?", 50000))
+	})
 }
 
 func TestWatchTouchRules(t *testing.T) {

@@ -72,3 +72,31 @@ nilengine-test: rust-build
 
 nilengine-bench: rust-build
 	$(GO) test -tags nilengine -count=1 -run '^$$' -bench . -benchtime 200000x $(NILENGINE_LDFLAGS) $(NILENGINE_PKG)
+
+# The server on any engine (docs/design/rust-engines.md, phase 2).
+# build-engines builds bin/nildb with --engine rocksdb|lsm|btree|pgheap;
+# test-engines runs the Go suites once per engine through
+# NILDB_TEST_ENGINE; bench-engines runs the end-to-end server benchmark
+# (cmd/nildb BenchmarkServer) BENCH_COUNT times per engine.
+ENGINES := rocksdb lsm btree pgheap
+ENGINE_PKGS ?= ./...
+BENCH_COUNT ?= 3
+BENCH_OPS ?= 20000x
+
+.PHONY: build-engines test-engines bench-engines
+
+build-engines: rust-build
+	$(GO) build -tags nilengine $(NILENGINE_LDFLAGS) -o bin/nildb ./cmd/nildb
+
+test-engines: rust-build
+	@for e in $(ENGINES); do \
+		echo "== NILDB_TEST_ENGINE=$$e"; \
+		NILDB_TEST_ENGINE=$$e $(GO) test -tags nilengine -count=1 $(NILENGINE_LDFLAGS) $(ENGINE_PKGS) || exit 1; \
+	done
+
+bench-engines: rust-build
+	@for e in $(ENGINES); do \
+		echo "== NILDB_TEST_ENGINE=$$e"; \
+		NILDB_TEST_ENGINE=$$e $(GO) test -tags nilengine -count=$(BENCH_COUNT) -run '^$$' -bench '^BenchmarkServer$$' \
+			-benchtime $(BENCH_OPS) -timeout 60m $(NILENGINE_LDFLAGS) ./cmd/nildb || exit 1; \
+	done
