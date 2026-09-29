@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use nilengine_api::{
     BatchOp, CfId, CrashMode, DbIterator, Engine, EngineKind, Error, IoContext, IterOptions,
-    Options, Result, Snapshot, WriteBatch, WriteOptions, i64add,
+    Options, Result, Snapshot, WriteBatch, WriteOptions, checkpoint, i64add,
 };
 
 use crate::compaction::{self, Compaction};
@@ -27,7 +27,9 @@ use crate::log::{LogEnd, LogWriter, read_records};
 use crate::memtable::{MemIter, MemTable, check_cf};
 use crate::rangedel::{Fragments, RangeTombstone};
 use crate::table::{BlockCache, TableBuilder, TableIter};
-use crate::version::{FileData, Version, VersionEdit, VersionSet, log_path, sync_dir, table_path};
+use crate::version::{
+    FileData, Version, VersionEdit, VersionSet, log_path, sync_dir, table_path, write_manifest_in,
+};
 
 /// Longest key the LSM accepts.
 pub const MAX_KEY_LEN: usize = 1 << 24;
@@ -101,6 +103,24 @@ struct Stats {
     compaction_read: AtomicU64,
     compaction_written: AtomicU64,
     stalls: AtomicU64,
+    running_flushes: AtomicU64,
+    running_compactions: AtomicU64,
+}
+
+/// Counts one running flush or compaction for as long as it lives.
+struct Running<'a>(&'a AtomicU64);
+
+impl<'a> Running<'a> {
+    fn start(n: &'a AtomicU64) -> Running<'a> {
+        n.fetch_add(1, Ordering::Relaxed);
+        Running(n)
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 struct Writer {
@@ -763,6 +783,7 @@ impl Inner {
     }
 
     fn flush_imm(&self, imm: &Arc<MemTable>) -> Result<()> {
+        let _running = Running::start(&self.stats.running_flushes);
         let files = build_tables(imm, &self.dir, &self.opts, &mut || {
             self.vs.lock().unwrap().new_file_number()
         })?;
@@ -823,6 +844,7 @@ impl Inner {
     }
 
     fn run_compaction(&self, c: Compaction) -> Result<()> {
+        let _running = Running::start(&self.stats.running_compactions);
         if c.is_trivial_move() {
             let f = &c.inputs[0];
             let mut edit = VersionEdit::default();
@@ -858,19 +880,26 @@ impl Inner {
         Ok(())
     }
 
+    /// Flushes every memtable that holds a write committed before the call.
+    /// It waits for the newest of them only, since memtables flush oldest
+    /// first; memtables that writers fill meanwhile do not delay it.
     fn flush(&self) -> Result<()> {
         self.check_open()?;
-        {
+        let target = {
             let mut w = self.writer.lock().unwrap();
             self.check_open()?;
             self.check_bg()?;
             if !self.sv().mem.is_empty() {
                 self.switch_memtable(&mut w)?;
             }
-        }
+            self.sv().imms.first().cloned()
+        };
+        let Some(target) = target else {
+            return Ok(());
+        };
         loop {
             self.check_bg()?;
-            if self.sv().imms.is_empty() {
+            if !self.sv().imms.iter().any(|m| Arc::ptr_eq(m, &target)) {
                 return Ok(());
             }
             self.check_open()?;
@@ -896,6 +925,65 @@ impl Inner {
             self.run_compaction(c)?;
         }
         Ok(())
+    }
+
+    /// Writes an openable copy into `dir`. It flushes the memtables, takes
+    /// the current version under the version lock and hard-links the
+    /// version's table files, copying one when the link fails, then writes a
+    /// manifest holding that version and `CURRENT`. Table files never change
+    /// once written, and holding the version keeps compactions from deleting
+    /// them until the links exist. Writes that land after the flush may be
+    /// in the copy or not; either way it is a prefix of the history, since
+    /// memtables flush oldest first and each flush installs a version.
+    fn checkpoint(&self, dir: &Path) -> Result<()> {
+        self.check_open()?;
+        let tmp = checkpoint::begin(dir)?;
+        let res = self
+            .checkpoint_into(&tmp)
+            .and_then(|()| checkpoint::finish(&tmp, dir));
+        if res.is_err() {
+            checkpoint::abandon(&tmp);
+        }
+        res
+    }
+
+    fn checkpoint_into(&self, tmp: &Path) -> Result<()> {
+        self.flush()?;
+        let (edit, manifest, version) = self.vs.lock().unwrap().checkpoint_state();
+        for f in version.cfs.iter().flat_map(|c| c.levels.iter().flatten()) {
+            checkpoint::link_or_copy(
+                &table_path(&self.dir, f.number()),
+                &table_path(tmp, f.number()),
+            )?;
+        }
+        write_manifest_in(tmp, manifest, &edit)
+    }
+
+    /// Sums, over the table files of `cf` that overlap each range, the
+    /// distance between the data blocks holding its two ends.
+    fn approximate_sizes(&self, cf: CfId, ranges: &[(&[u8], &[u8])]) -> Result<Vec<u64>> {
+        self.check_open()?;
+        let icf = self.icf(cf)? as usize;
+        let sv = self.sv();
+        let c = &sv.version.cfs[icf];
+        ranges
+            .iter()
+            .map(|&(start, limit)| {
+                if start >= limit {
+                    return Ok(0);
+                }
+                let mut total = 0u64;
+                for f in c.levels.iter().flatten() {
+                    if !f.overlaps(Some(start), Some(limit)) {
+                        continue;
+                    }
+                    let t = f.table()?;
+                    let (a, b) = (t.approximate_offset(start)?, t.approximate_offset(limit)?);
+                    total += b.saturating_sub(a);
+                }
+                Ok(total)
+            })
+            .collect()
     }
 
     fn iter(&self, cf: CfId, opts: IterOptions) -> Result<Box<dyn DbIterator>> {
@@ -969,12 +1057,34 @@ impl Inner {
             "rocksdb.cur-size-all-mem-tables" => {
                 mems().map(|m| m.usage()).sum::<usize>().to_string()
             }
-            "rocksdb.total-sst-files-size" => c
+            // Obsolete files leave the version at once, so every file it
+            // names is live, and live data is the same set of files.
+            "rocksdb.total-sst-files-size"
+            | "rocksdb.live-sst-files-size"
+            | "rocksdb.estimate-live-data-size" => c
                 .levels
                 .iter()
                 .flatten()
                 .map(|f| f.d.size)
                 .sum::<u64>()
+                .to_string(),
+            "rocksdb.size-all-mem-tables" => mems().map(|m| m.usage()).sum::<usize>().to_string(),
+            "rocksdb.num-entries-active-mem-table" => sv.mem.entries_for(icf as u32).to_string(),
+            "rocksdb.mem-table-flush-pending" => u8::from(!sv.imms.is_empty()).to_string(),
+            "rocksdb.compaction-pending" => {
+                u8::from(compaction::needs_compaction(&sv.version, &self.opts)).to_string()
+            }
+            // Index and filter blocks live outside the block cache.
+            "rocksdb.block-cache-pinned-usage" => "0".to_string(),
+            "rocksdb.num-running-flushes" => self
+                .stats
+                .running_flushes
+                .load(Ordering::Relaxed)
+                .to_string(),
+            "rocksdb.num-running-compactions" => self
+                .stats
+                .running_compactions
+                .load(Ordering::Relaxed)
                 .to_string(),
             "rocksdb.estimate-pending-compaction-bytes" => {
                 compaction::pending_bytes(&sv.version, icf, &self.opts).to_string()
@@ -1173,6 +1283,14 @@ impl Engine for LsmEngine {
 
     fn latest_sequence(&self) -> u64 {
         self.inner.last_seq.load(Ordering::Acquire)
+    }
+
+    fn checkpoint(&self, dir: &Path) -> Result<()> {
+        self.inner.checkpoint(dir)
+    }
+
+    fn approximate_sizes(&self, cf: CfId, ranges: &[(&[u8], &[u8])]) -> Result<Vec<u64>> {
+        self.inner.approximate_sizes(cf, ranges)
     }
 
     fn close(&self) -> Result<()> {

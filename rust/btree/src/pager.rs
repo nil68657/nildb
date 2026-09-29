@@ -74,6 +74,10 @@ impl Pager {
         self.page_size
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn file_len(&self) -> Result<u64> {
         Ok(self
             .file

@@ -205,6 +205,32 @@ char *nil_property(nil_db *db, uint32_t cf, const char *name);
  */
 uint64_t nil_latest_sequence(nil_db *db);
 
+/*
+ * Writes an openable copy of the database into directory `dir`, which must
+ * not exist ("invalid-argument") and whose parent must ("not-found"). The
+ * copy holds every write committed before the call and is a consistent
+ * state: a prefix of the commit history, no batch in part. It is built in
+ * `dir` with ".tmp" appended and renamed into place, so a crash never leaves
+ * a partial copy under `dir`. Writers keep running. The LSM flushes its
+ * memtables and hard-links its table files; the B+ tree copies its data
+ * file (a clone on APFS) and rewrites its meta pages; pgheap runs a
+ * checkpoint and copies its files and then its WAL, which the copy replays
+ * when it is opened.
+ */
+void nil_checkpoint(nil_db *db, const char *dir, char **errptr);
+
+/*
+ * Estimates the bytes each of the n ranges [starts[i], limits[i]) of cf
+ * takes on disk and stores them in sizes[i]. Both ends are keys (NULL with
+ * length 0 is the empty key); a range with start >= limit is 0, and so is a
+ * range that holds no key. The LSM counts table files only, as RocksDB's
+ * GetApproximateSizes does by default; the B+ tree and pgheap estimate from
+ * one root-to-leaf descent per end. On error every sizes[i] is 0.
+ */
+void nil_approximate_sizes(nil_db *db, uint32_t cf, size_t n, const char *const *starts,
+                           const size_t *start_lens, const char *const *limits,
+                           const size_t *limit_lens, uint64_t *sizes, char **errptr);
+
 #ifdef __cplusplus
 }
 #endif

@@ -177,9 +177,10 @@ fn lower_bound(p: &[u8], sk: Sk<'_>) -> u16 {
     lo
 }
 
-/// Child of an internal page to descend for `sk`: the last data item whose
-/// separator is at or below it (the first data item is minus infinity).
-fn find_child(p: &[u8], sk: Sk<'_>) -> u32 {
+/// Offset of the item of an internal page to descend for `sk`: the last
+/// data item whose separator is at or below it (the first data item is minus
+/// infinity).
+fn child_offset(p: &[u8], sk: Sk<'_>) -> u16 {
     let fd = first_data(p);
     let (mut lo, mut hi) = (fd + 1, page::max_offset(p) + 1);
     while lo < hi {
@@ -191,7 +192,12 @@ fn find_child(p: &[u8], sk: Sk<'_>) -> u32 {
             hi = mid;
         }
     }
-    pivot_child(page::item(p, lo - 1))
+    lo - 1
+}
+
+/// Child of an internal page to descend for `sk`.
+fn find_child(p: &[u8], sk: Sk<'_>) -> u32 {
+    pivot_child(page::item(p, child_offset(p, sk)))
 }
 
 /// All entries of one key found by a scan.
@@ -308,6 +314,57 @@ impl Index {
             }
         }
         Err(corrupt(self.rel, "descent does not end"))
+    }
+
+    /// Estimates the share of the index's entries that sort before `key`
+    /// from one descent that counts sibling subtrees as equal in size. A
+    /// move right past a split that happened during the descent adds
+    /// nothing, which only makes the estimate coarser.
+    pub fn rank_fraction(&self, pool: &BufferPool, key: &[u8]) -> Result<f64> {
+        let sk = Sk::At(key, Tid::MIN);
+        let mut blk = self.root.load(AtOrd::Acquire);
+        if blk == 0 {
+            return Ok(0.0);
+        }
+        let (mut below, mut width) = (0.0f64, 1.0f64);
+        for _ in 0..1_000_000 {
+            let b = pool.get(self.tag(blk), Mode::Read)?;
+            let g = b.read();
+            let p = &g[..];
+            if page::kind(p) != page::KIND_BTREE {
+                return Err(corrupt(self.rel, "descent reached a non-index page"));
+            }
+            if beyond_high_key(p, sk) {
+                blk = next(p);
+                continue;
+            }
+            let fd = first_data(p);
+            let last = page::max_offset(p);
+            if is_leaf(p) {
+                if last >= fd {
+                    let n = f64::from(last + 1 - fd);
+                    below += width * f64::from(lower_bound(p, sk) - fd) / n;
+                }
+                return Ok(below);
+            }
+            if last < fd {
+                return Err(corrupt(self.rel, "internal page without a child"));
+            }
+            let off = child_offset(p, sk);
+            width /= f64::from(last + 1 - fd);
+            below += f64::from(off - fd) * width;
+            blk = pivot_child(page::item(p, off));
+            if blk == 0 {
+                return Err(corrupt(self.rel, "internal page without a child"));
+            }
+        }
+        Err(corrupt(self.rel, "descent does not end"))
+    }
+
+    /// Whether the index holds an entry with a key in `[start, limit)`.
+    pub fn has_entries(&self, pool: &BufferPool, start: &[u8], limit: &[u8]) -> Result<bool> {
+        let (groups, _) = self.scan_forward(pool, start, true, 1)?;
+        Ok(groups.first().is_some_and(|g| g.key.as_slice() < limit))
     }
 
     /// Entries with key at or after `start` (after, when not `inclusive`),

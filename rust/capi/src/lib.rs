@@ -717,6 +717,67 @@ pub unsafe extern "C" fn nil_latest_sequence(db: *mut nil_db) -> u64 {
     })
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nil_checkpoint(
+    db: *mut nil_db,
+    dir: *const c_char,
+    errptr: *mut *mut c_char,
+) {
+    guard(errptr, (), || {
+        let db = unsafe { db_ref(db) }?;
+        let dir = unsafe { cstr(dir, "dir") }?;
+        db.engine.checkpoint(Path::new(dir))
+    });
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nil_approximate_sizes(
+    db: *mut nil_db,
+    cf: u32,
+    n: usize,
+    starts: *const *const c_char,
+    start_lens: *const usize,
+    limits: *const *const c_char,
+    limit_lens: *const usize,
+    sizes: *mut u64,
+    errptr: *mut *mut c_char,
+) {
+    guard(errptr, (), || {
+        if n == 0 {
+            return Ok(());
+        }
+        if starts.is_null()
+            || start_lens.is_null()
+            || limits.is_null()
+            || limit_lens.is_null()
+            || sizes.is_null()
+        {
+            return Err(Error::invalid(
+                "nil_approximate_sizes needs non-NULL range and output arrays",
+            ));
+        }
+        for i in 0..n {
+            // SAFETY: the caller provides an n-element output array.
+            unsafe { *sizes.add(i) = 0 };
+        }
+        let db = unsafe { db_ref(db) }?;
+        let ranges = (0..n)
+            .map(|i| unsafe {
+                Ok((
+                    bytes(*starts.add(i), *start_lens.add(i))?,
+                    bytes(*limits.add(i), *limit_lens.add(i))?,
+                ))
+            })
+            .collect::<Result<Vec<(&[u8], &[u8])>, Error>>()?;
+        let got = db.engine.approximate_sizes(cf, &ranges)?;
+        for (i, v) in got.into_iter().enumerate() {
+            unsafe { *sizes.add(i) = v };
+        }
+        Ok(())
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,6 +1019,87 @@ mod tests {
     #[test]
     fn pgheap_round_trip() {
         round_trip(NIL_ENGINE_PGHEAP, "pgheap");
+    }
+
+    fn checkpoint_and_sizes(kind: c_int, name: &str) {
+        let dir = tmpdir(&format!("{name}-src"));
+        let cp = tmpdir(&format!("{name}-cp"));
+        let names = [CString::new("default").unwrap()];
+        let ptrs: Vec<*const c_char> = names.iter().map(|n| n.as_ptr()).collect();
+        let mut e = Err::new();
+        let db = unsafe { nil_open(kind, dir.as_ptr(), ptrs.as_ptr(), 1, ptr::null(), &mut e.0) };
+        assert_eq!(e.take(), None);
+        let b = nil_batch_new();
+        let val = [b'v'; 100];
+        for i in 0..500u32 {
+            let k = format!("key{i:05}");
+            unsafe { nil_batch_put(b, 0, k.as_ptr() as _, k.len(), val.as_ptr() as _, 100) };
+        }
+        unsafe {
+            nil_write(db, b, 0, &mut e.0);
+            nil_batch_destroy(b);
+            // The LSM counts table files only.
+            nil_flush(db, &mut e.0);
+        }
+        assert_eq!(e.take(), None);
+        let starts: [&[u8]; 3] = [b"key", b"zzz", b"key"];
+        let limits: [&[u8]; 3] = [b"kez", b"zzzz", b"key"];
+        let sp: Vec<*const c_char> = starts.iter().map(|k| k.as_ptr() as _).collect();
+        let sl: Vec<usize> = starts.iter().map(|k| k.len()).collect();
+        let lp: Vec<*const c_char> = limits.iter().map(|k| k.as_ptr() as _).collect();
+        let ll: Vec<usize> = limits.iter().map(|k| k.len()).collect();
+        let mut sizes = [u64::MAX; 3];
+        unsafe {
+            nil_approximate_sizes(
+                db,
+                0,
+                3,
+                sp.as_ptr(),
+                sl.as_ptr(),
+                lp.as_ptr(),
+                ll.as_ptr(),
+                sizes.as_mut_ptr(),
+                &mut e.0,
+            );
+        }
+        assert_eq!(e.take(), None);
+        assert!(sizes[0] > 0, "{name}: {sizes:?}");
+        assert_eq!(sizes[1..], [0, 0], "{name}: a range without keys");
+        unsafe { nil_checkpoint(db, cp.as_ptr(), &mut e.0) };
+        assert_eq!(e.take(), None);
+        unsafe { nil_checkpoint(db, cp.as_ptr(), &mut e.0) };
+        assert!(
+            e.take().unwrap().starts_with("invalid-argument"),
+            "{name}: a checkpoint into an existing directory"
+        );
+        unsafe { nil_close(db, &mut e.0) };
+        assert_eq!(e.take(), None);
+        let copy = unsafe { nil_open(kind, cp.as_ptr(), ptrs.as_ptr(), 1, ptr::null(), &mut e.0) };
+        assert_eq!(e.take(), None);
+        assert_eq!(
+            get(copy, ptr::null(), 0, b"key00499").as_deref(),
+            Some(&val[..])
+        );
+        unsafe { nil_close(copy, &mut e.0) };
+        assert_eq!(e.take(), None);
+        for d in [dir, cp] {
+            let _ = std::fs::remove_dir_all(d.to_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn lsm_checkpoint_and_sizes() {
+        checkpoint_and_sizes(NIL_ENGINE_LSM, "lsm-cp");
+    }
+
+    #[test]
+    fn btree_checkpoint_and_sizes() {
+        checkpoint_and_sizes(NIL_ENGINE_BTREE, "btree-cp");
+    }
+
+    #[test]
+    fn pgheap_checkpoint_and_sizes() {
+        checkpoint_and_sizes(NIL_ENGINE_PGHEAP, "pgheap-cp");
     }
 
     #[test]

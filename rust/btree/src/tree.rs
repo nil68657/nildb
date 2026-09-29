@@ -155,6 +155,52 @@ pub fn get(pager: &Pager, root: &Root, key: &[u8]) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// Estimates the share of a committed tree's keys that sort below `key`
+/// from one root-to-leaf descent that counts sibling subtrees as equal in
+/// size. Returns it with the average bytes per entry (key plus value) of the
+/// leaf the descent reached, 0 for an empty leaf.
+pub fn rank_estimate(pager: &Pager, root: &Root, key: &[u8]) -> Result<(f64, f64)> {
+    if root.page == 0 {
+        return Ok((0.0, 0.0));
+    }
+    let (mut below, mut width) = (0.0f64, 1.0f64);
+    let mut r = root.child();
+    loop {
+        let p = pager.read(r.page, r.txn, false)?;
+        match page_type(&p) {
+            TYPE_BRANCH => {
+                let i = branch_find(&p, key);
+                width /= (count(&p) + 1) as f64;
+                below += i as f64 * width;
+                r = branch_child(&p, i);
+            }
+            TYPE_LEAF => {
+                let n = count(&p);
+                if n == 0 {
+                    return Ok((below, 0.0));
+                }
+                below += width * leaf_search(&p, key, false) as f64 / n as f64;
+                let bytes: usize = (0..n)
+                    .map(|i| {
+                        leaf_key(&p, i).len()
+                            + match leaf_val(&p, i) {
+                                ValRef::Inline(v) => v.len(),
+                                ValRef::Overflow { len, .. } => len as usize,
+                            }
+                    })
+                    .sum();
+                return Ok((below, bytes as f64 / n as f64));
+            }
+            t => {
+                return Err(Error::corruption(format!(
+                    "page {} of type {t} inside a tree",
+                    r.page
+                )));
+            }
+        }
+    }
+}
+
 /// Walks a committed tree read straight from the file, checking every page
 /// (checksum, number, writer transaction, structure) and marking the pages
 /// it reaches in `seen`. Recovery uses it to choose a meta page and to find

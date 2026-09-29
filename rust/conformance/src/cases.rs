@@ -2,7 +2,7 @@
 //! difference between the engine and the model.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use nilengine_api::{
@@ -1460,6 +1460,168 @@ pub fn soak(h: &Harness) {
         };
         crash_recovery(h, 2000 + seed, 6, mode);
     }
+}
+
+/// A checkpoint taken while a writer runs is a consistent copy: it holds
+/// every batch acknowledged before the call and a prefix of the rest, no
+/// batch in part (the marker key, written in each batch, says how many),
+/// and it lives on independently of its source.
+pub fn checkpoint_is_a_consistent_copy(h: &Harness) {
+    let dir = TempDir::new("ckpt-src");
+    let out = TempDir::new("ckpt-out");
+    let e = h.open(dir.path(), &CFS);
+    let mut w = Workload::new(31);
+    let mut model = Model::new(CFS.len());
+    for i in 0..300 {
+        let b = w.batch();
+        apply(&*e, &mut model, &b);
+        if i % 97 == 0 {
+            e.flush().unwrap();
+        }
+    }
+    let base = model.clone();
+    let cp = out.path().join("cp");
+    let written = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let (before, history) = thread::scope(|s| {
+        let writer = s.spawn(|| {
+            let mut w = Workload::new(32);
+            let mut history = Vec::new();
+            while !stop.load(Ordering::Acquire) || history.len() < 50 {
+                let mut b = w.batch();
+                b.put(0, MARKER, &(history.len() as u64 + 1).to_be_bytes());
+                e.write(&b, wo(false)).unwrap();
+                history.push(b);
+                written.store(history.len(), Ordering::Release);
+            }
+            history
+        });
+        while written.load(Ordering::Acquire) < 20 {
+            thread::yield_now();
+        }
+        let before = written.load(Ordering::Acquire);
+        e.checkpoint(&cp)
+            .unwrap_or_else(|err| panic!("{}: checkpoint: {err}", h.name));
+        stop.store(true, Ordering::Release);
+        (before, writer.join().unwrap())
+    });
+    for b in &history {
+        model.apply(b).unwrap();
+    }
+    check_state(
+        &*e,
+        &model,
+        None,
+        &format!("{}: source after the checkpoint", h.name),
+    );
+    assert!(
+        matches!(e.checkpoint(&cp), Err(Error::InvalidArgument(_))),
+        "{}: a checkpoint into an existing directory",
+        h.name
+    );
+    assert!(
+        matches!(
+            e.checkpoint(&out.path().join("missing").join("cp")),
+            Err(Error::NotFound(_))
+        ),
+        "{}: a checkpoint under a missing parent",
+        h.name
+    );
+
+    let c = h.open(&cp, &CFS);
+    let k = marker(&*c);
+    assert!(
+        k >= before && k <= history.len(),
+        "{}: the checkpoint holds {k} batches; {before} were acknowledged before it and {} written in all",
+        h.name,
+        history.len()
+    );
+    let mut want = base;
+    for b in &history[..k] {
+        want.apply(b).unwrap();
+    }
+    check_state(
+        &*c,
+        &want,
+        None,
+        &format!("{}: checkpoint with {k} batches", h.name),
+    );
+    // The copy takes writes of its own, and a checkpoint of it works too.
+    put(&*c, 1, b"only-in-copy", b"x");
+    assert_eq!(get(&*e, 1, b"only-in-copy"), None);
+    let cp2 = out.path().join("cp2");
+    c.checkpoint(&cp2).unwrap();
+    c.close().unwrap();
+    let c = h.open(&cp, &CFS);
+    assert_eq!(get(&*c, 1, b"only-in-copy").as_deref(), Some(&b"x"[..]));
+    c.close().unwrap();
+    let c2 = h.open(&cp2, &CFS);
+    assert_eq!(get(&*c2, 1, b"only-in-copy").as_deref(), Some(&b"x"[..]));
+    assert_eq!(marker(&*c2), k);
+    c2.close().unwrap();
+    e.close().unwrap();
+}
+
+/// Approximate sizes are 0 for empty and reversed ranges and for ranges
+/// without keys, grow with the data a range holds, and fall to 0 once the
+/// data is deleted and compacted.
+pub fn approximate_sizes_follow_the_data(h: &Harness) {
+    let dir = TempDir::new("sizes");
+    let e = h.open(dir.path(), &CFS);
+    let sizes = |cf: CfId, ranges: &[(&[u8], &[u8])]| e.approximate_sizes(cf, ranges).unwrap();
+    assert_eq!(sizes(1, &[(b"a", b"z"), (b"", b"\xff")]), [0, 0]);
+    const N: usize = 3000;
+    for chunk in 0..N / 100 {
+        let mut b = WriteBatch::new();
+        for i in chunk * 100..(chunk + 1) * 100 {
+            b.put(1, &key(i), &[b'v'; 100]);
+        }
+        e.write(&b, wo(false)).unwrap();
+    }
+    // The LSM counts table files only.
+    e.flush().unwrap();
+    let (k0, kh, kn) = (key(0), key(N / 2), key(N));
+    let got = sizes(
+        1,
+        &[
+            (&k0, &kn),
+            (&k0, &kh),
+            (&kh, &kn),
+            (b"a", b"b"),
+            (b"zzz", b"zzzz"),
+            (&kn, &k0),
+            (&kh, &kh),
+        ],
+    );
+    let full = got[0];
+    assert!(full > 0, "{}: sizes {got:?}", h.name);
+    for half in [got[1], got[2]] {
+        assert!(
+            half >= full / 10 && half <= full * 9 / 10,
+            "{}: half the keys take {half} of {full} bytes",
+            h.name
+        );
+    }
+    assert_eq!(got[3..], [0, 0, 0, 0], "{}: sizes {got:?}", h.name);
+    assert_eq!(sizes(2, &[(&k0, &kn)]), [0], "{}: another family", h.name);
+    assert!(matches!(
+        e.approximate_sizes(9, &[(&k0, &kn)]),
+        Err(Error::InvalidArgument(_))
+    ));
+    assert_eq!(e.approximate_sizes(1, &[]).unwrap(), Vec::<u64>::new());
+
+    let mut b = WriteBatch::new();
+    b.delete_range(1, &k0, &kn);
+    e.write(&b, wo(false)).unwrap();
+    e.flush().unwrap();
+    e.compact_range(1, None, None).unwrap();
+    assert_eq!(
+        sizes(1, &[(&k0, &kn)]),
+        [0],
+        "{}: after deleting and compacting everything",
+        h.name
+    );
+    e.close().unwrap();
 }
 
 pub fn crash_after_reopen_cycles(h: &Harness) {

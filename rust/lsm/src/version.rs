@@ -581,6 +581,18 @@ impl VersionSet {
         e
     }
 
+    /// What a checkpoint records: an edit holding the whole current state,
+    /// with a manifest number and a log number above every file it names,
+    /// and the version itself, whose `FileMeta`s keep the table files on
+    /// disk while the caller links them.
+    pub fn checkpoint_state(&self) -> (VersionEdit, u64, Arc<Version>) {
+        let mut e = self.snapshot_edit();
+        let manifest = self.next_file_number;
+        e.next_file_number = Some(manifest + 1);
+        e.log_number = Some(manifest + 1);
+        (e, manifest, self.current.clone())
+    }
+
     /// Writes a new manifest holding the whole current state and points
     /// `CURRENT` at it.
     pub fn write_new_manifest(&mut self) -> Result<()> {
@@ -594,6 +606,15 @@ impl VersionSet {
         self.manifest_number = number;
         Ok(())
     }
+}
+
+/// Writes `edit` as the only record of manifest `number` in `dir`, synced,
+/// and points `CURRENT` at it: the manifest of a checkpoint.
+pub fn write_manifest_in(dir: &Path, number: u64, edit: &VersionEdit) -> Result<()> {
+    let mut w = LogWriter::create(&manifest_path(dir, number))?;
+    w.add_record(&[&edit.encode()])?;
+    w.sync()?;
+    set_current(dir, number)
 }
 
 fn set_current(dir: &Path, number: u64) -> Result<()> {
