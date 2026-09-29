@@ -35,18 +35,20 @@ var cfProperties = []string{
 // numLevels is RocksDB's default num_levels, which store keeps.
 const numLevels = 7
 
-// info is ROCKS.INFO.
+// info is ROCKS.INFO. version is the engine's: the linked RocksDB, or the
+// Rust engine library under --engine lsm, btree or pgheap.
 func (a *admin) info(c *command.Ctx, _ [][]byte) resp.Reply {
 	st := c.Store
 	cfg := st.Config()
-	shim, _ := store.ShimActive()
+	shim, _ := st.ShimActive()
 	names := st.CFNames()
 	cfs := make([]resp.Reply, len(names))
 	for i, n := range names {
 		cfs[i] = resp.Str(n)
 	}
 	return resp.Map(
-		resp.Str("version"), resp.Str(version()),
+		resp.Str("version"), resp.Str(st.EngineVersion()),
+		resp.Str("engine"), resp.Str(st.Engine()),
 		resp.Str("column_families"), resp.Array(cfs...),
 		resp.Str("dir"), resp.Str(cfg.Dir),
 		resp.Str("readonly"), resp.Str(yesNo(st.ReadOnly())),

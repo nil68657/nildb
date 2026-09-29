@@ -1,7 +1,9 @@
 // nildb is the NilDB server: Redis 7.2 data commands, ROCKS.* admin
 // commands, and the DOC.* document and NIL.* analytics commands, over
-// RESP2 and RESP3 on one port, stored in RocksDB. nildb -h
-// lists the flags; --config names a key=value file (internal/config).
+// RESP2 and RESP3 on one port, stored in RocksDB or, in a binary built
+// with -tags nilengine (make build-engines), in one of NilDB's Rust
+// engines chosen with --engine. nildb -h lists the flags; --config names
+// a key=value file (internal/config).
 //
 // SIGINT, SIGTERM or the SHUTDOWN command stop it: the listener closes,
 // in-flight commands finish (sockets still busy after 5 s are closed),
@@ -113,8 +115,7 @@ func run(args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	major, minor, patch := store.Version()
-	log.Printf("listening on %s, data in %s, fsync %s, RocksDB %d.%d.%d", addr, st.Config().Dir, cfg.Fsync, major, minor, patch)
+	log.Printf("listening on %s, data in %s, fsync %s, engine %s %s", addr, st.Config().Dir, cfg.Fsync, st.Engine(), st.EngineVersion())
 	logged := make(chan struct{})
 	go func() {
 		defer close(logged)
@@ -139,6 +140,7 @@ func run(args []string) (err error) {
 func openStore(cfg *config.Config) (*store.Store, error) {
 	sc := store.Config{
 		Dir:                 cfg.Dir,
+		Engine:              cfg.Engine,
 		BlockCacheBytes:     cfg.BlockCacheBytes(),
 		AnalyticsCacheBytes: cfg.AnalyticsCacheBytes(),
 		WriteBufferBytes:    cfg.WriteBufferBytes(),

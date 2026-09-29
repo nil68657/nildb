@@ -32,6 +32,7 @@ func newEnv(t *testing.T) *env {
 	}
 	st, err := store.Open(store.Config{
 		Dir:                 t.TempDir(),
+		Engine:              store.TestEngine(),
 		BlockCacheBytes:     8 << 20,
 		AnalyticsCacheBytes: 4 << 20,
 		WriteBufferBytes:    32 << 20,

@@ -12,7 +12,7 @@ func openStore(t *testing.T) *store.Store {
 	if testing.Short() {
 		t.Skip("opens RocksDB")
 	}
-	st, err := store.Open(store.Config{Dir: t.TempDir(), BlockCacheBytes: 8 << 20, AnalyticsCacheBytes: 8 << 20, WriteBufferBytes: 32 << 20})
+	st, err := store.Open(store.Config{Dir: t.TempDir(), Engine: store.TestEngine(), BlockCacheBytes: 8 << 20, AnalyticsCacheBytes: 8 << 20, WriteBufferBytes: 32 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}

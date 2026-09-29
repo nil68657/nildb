@@ -1,16 +1,18 @@
 // Package admin implements the ROCKS.* commands of architecture.md
-// section 6, which put ldb-style questions about the RocksDB instance
-// under NilDB on the wire, and the "rocksdb" and "persistence" INFO
-// sections. Every command is Admin and NoMulti. Raw keys and values cross
-// the wire as hex (either case in, lowercase out), and replies with named
-// fields are maps in RESP3 and flat arrays in RESP2.
+// section 6, which put ldb-style questions about the engine under NilDB
+// on the wire, and the "rocksdb" and "persistence" INFO sections. The
+// names stay ROCKS.* whatever the engine; ROCKS.INGEST, ROCKS.SETOPTION
+// and ROCKS.CHECKPOINT dir CF cf need RocksDB, and on the other engines
+// reply the store's "ERR not supported with --engine ..." error. Every
+// command is Admin and NoMulti. Raw keys and values cross the wire as hex
+// (either case in, lowercase out), and replies with named fields are maps
+// in RESP3 and flat arrays in RESP2.
 package admin
 
 import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -164,10 +166,4 @@ func yesNo(b bool) string {
 		return "yes"
 	}
 	return "no"
-}
-
-// version is the linked RocksDB version, "11.8.1".
-func version() string {
-	major, minor, patch := store.Version()
-	return strconv.Itoa(major) + "." + strconv.Itoa(minor) + "." + strconv.Itoa(patch)
 }

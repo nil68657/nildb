@@ -275,7 +275,7 @@ func TestCursorSnapshotCap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("opens RocksDB")
 	}
-	st, err := store.Open(store.Config{Dir: t.TempDir(), BlockCacheBytes: 8 << 20, AnalyticsCacheBytes: 4 << 20,
+	st, err := store.Open(store.Config{Dir: t.TempDir(), Engine: store.TestEngine(), BlockCacheBytes: 8 << 20, AnalyticsCacheBytes: 4 << 20,
 		WriteBufferBytes: 16 << 20, Fsync: store.FsyncNo, MaxSnapshots: 2})
 	if err != nil {
 		t.Fatal(err)

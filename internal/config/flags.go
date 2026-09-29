@@ -45,8 +45,11 @@ type option struct {
 
 // options lists every setting in the order Usage prints them.
 var options = []option{
-	{name: "dir", usage: "RocksDB data directory", kind: kString,
+	{name: "dir", usage: "data directory", kind: kString,
 		ptr: func(c *Config) any { return &c.Dir }},
+	{name: "engine", usage: "storage engine: rocksdb, or lsm, btree or pgheap in a binary built with -tags nilengine", kind: kString,
+		oneOf: []string{EngineRocksDB, EngineLSM, EngineBTree, EnginePgHeap},
+		ptr:   func(c *Config) any { return &c.Engine }},
 	{name: "addr", usage: "listen address, host:port", kind: kString, check: checkAddr,
 		ptr: func(c *Config) any { return &c.Addr }},
 	{name: "requirepass", usage: "password for AUTH; empty disables AUTH", kind: kString, secret: true,

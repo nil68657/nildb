@@ -15,6 +15,7 @@ import (
 func testConfig(dir string) store.Config {
 	return store.Config{
 		Dir:                 dir,
+		Engine:              store.TestEngine(),
 		BlockCacheBytes:     8 << 20,
 		AnalyticsCacheBytes: 4 << 20,
 		WriteBufferBytes:    32 << 20,

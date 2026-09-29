@@ -38,7 +38,7 @@ func newTestServer(t *testing.T, mutate func(*config.Config)) *Server {
 		t.Fatal(err)
 	}
 	st, err := store.Open(store.Config{
-		Dir: cfg.Dir, BlockCacheBytes: cfg.BlockCacheBytes(), AnalyticsCacheBytes: cfg.AnalyticsCacheBytes(),
+		Dir: cfg.Dir, Engine: store.TestEngine(), BlockCacheBytes: cfg.BlockCacheBytes(), AnalyticsCacheBytes: cfg.AnalyticsCacheBytes(),
 		WriteBufferBytes: cfg.WriteBufferBytes(), Fsync: cfg.Fsync, MaxSnapshots: cfg.MaxSnapshots,
 		LeaseTTL: cfg.LeaseTTL, LeaseMax: cfg.LeaseMax, Clock: cfg.ClockFunc(),
 	})

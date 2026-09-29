@@ -19,7 +19,7 @@ func (a *admin) infoRocksdb(b *strings.Builder) {
 		n, _ := st.IntProperty(cf, name)
 		return n
 	}
-	field(b, "rocksdb_version", version())
+	field(b, "rocksdb_version", st.EngineVersion())
 	field(b, "rocksdb_column_families", strings.Join(st.CFNames(), ","))
 	var pending, memtables uint64
 	for _, cf := range allCFs() {
@@ -44,7 +44,7 @@ func (a *admin) infoRocksdb(b *strings.Builder) {
 	uintField(b, "nildb_leases", uint64(len(st.Leases())))
 	uintField(b, "nildb_max_snapshots", uint64(st.Config().MaxSnapshots))
 	uintField(b, "nildb_scheduled_compactions", uint64(st.PendingCompactions()))
-	shim, _ := store.ShimActive()
+	shim, _ := st.ShimActive()
 	field(b, "nildb_rate_limiter_priority_shim", yesNo(shim))
 	field(b, "nildb_statistics", yesNo(st.Config().Statistics))
 }

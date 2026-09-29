@@ -1,12 +1,12 @@
 # NilDB storage engines in Rust
 
-Status: phase 1 done on 2026-09-27. Two engines, an LSM tree and a copy-on-write B+ tree, pass one conformance suite, are callable from C and from Go, and have a first benchmark against RocksDB 11.8.1. A third engine, pgheap, modelled on PostgreSQL's heap storage, was added on 2026-09-28 and passes the same suite (section "pgheap engine"). Nothing in the server uses them yet; phase 2 puts them behind `internal/store` (last section).
+Status: phase 1 done on 2026-09-27. Two engines, an LSM tree and a copy-on-write B+ tree, pass one conformance suite, are callable from C and from Go, and have a first benchmark against RocksDB 11.8.1. A third engine, pgheap, modelled on PostgreSQL's heap storage, was added on 2026-09-28 and passes the same suite (section "pgheap engine"). Phase 2, built on 2026-09-28, puts all three behind `internal/store`: `nildb --engine lsm|btree|pgheap` runs the whole server on a Rust engine, and `--engine rocksdb` stays the default (last section).
 
-Everything lives in `rust/` (a cargo workspace), `rust/include/nilengine.h` and `internal/nilengine`.
+The engines live in `rust/` (a cargo workspace), `rust/include/nilengine.h` and `internal/nilengine`; the store's side of phase 2 lives in `internal/store`.
 
 | Crate | Directory | Contents |
 |---|---|---|
-| `nilengine-api` | `rust/api` | `Engine` trait, `WriteBatch`, options, errors, varints, CRC-32, a sharded LRU cache |
+| `nilengine-api` | `rust/api` | `Engine` trait, `WriteBatch`, options, errors, varints, CRC-32, a sharded LRU cache, checkpoint file helpers |
 | `nilengine-conformance` | `rust/conformance` | the suite every engine runs, a `BTreeMap` model, seeded workloads |
 | `nilengine-lsm` | `rust/lsm` | LSM engine |
 | `nilengine-btree` | `rust/btree` | B+ tree engine |
@@ -29,6 +29,8 @@ The only third-party crate is `crc32fast` (plus its `cfg-if`); pgheap added none
 | `NewIteratorCF` with `iterate_lower_bound` / `iterate_upper_bound`, `Seek`, `SeekForPrev`, `SeekToFirst`, `SeekToLast`, `Next`, `Prev` | `iter(cf, IterOptions)` returning a `DbIterator` with the same calls and RocksDB's bound rules |
 | `FlushCF`, `FlushWAL(sync)`, `CompactRangeCFOpt` | `flush`, `flush_wal(sync)`, `compact_range(cf, start, end)` |
 | `GetPropertyCF`, `GetIntPropertyCF`, `GetLatestSequenceNumber` | `property(cf, name)`, `latest_sequence()` |
+| `CreateCheckpoint` (phase 2) | `checkpoint(dir)` |
+| `GetApproximateSizesCF` (phase 2) | `approximate_sizes(cf, ranges)` |
 
 An iterator keeps the state it opened on readable even after its snapshot is released, as a RocksDB iterator does. `crash(mode)` exists for tests: it stops the engine without a clean shutdown and damages unsynced data as a power loss would (`DropUnsynced`, or `PartialUnsynced { seed }`, which keeps, drops or tears each unsynced write).
 
@@ -241,33 +243,35 @@ The autovacuum thread wakes every `autovacuum_naptime_ms` (default 1000; Postgre
 - The sweeper replaces RocksDB's compaction filters for every Rust engine. On pgheap each row it deletes becomes a dead tuple, so the sweeper should run VACUUM (`compact_range`) on a family after a large round instead of waiting for autovacuum's threshold.
 - `--engine pgheap`, the `ENGINE` marker and `ROCKS.*` map as for the other engines; `ROCKS.COMPACT` runs VACUUM. A checkpoint for `ROCKS.CHECKPOINT` would be a PostgreSQL base backup: a checkpoint, a copy of the relation files, and the WAL from the redo pointer to the end of the copy.
 
+Phase 2 did all of this except splitting large delete-ranges, which is still deferred. `ROCKS.STATS` on pgheap ends with the oldest registered xmin and the number of registered snapshots.
+
 ## C interface
 
-`rust/include/nilengine.h` is hand-written; `rust/capi/src/lib.rs` implements it; `nm` shows the 37 exported `nil_*` symbols. The archive needs `-lSystem -lc -lm`, which macOS links by default.
+`rust/include/nilengine.h` is hand-written; `rust/capi/src/lib.rs` implements it; `nm` shows the 39 exported `nil_*` symbols. The archive needs `-lSystem -lc -lm`, which macOS links by default.
 
-- Handles: `nil_db`, `nil_batch`, `nil_snapshot`, `nil_iter`, all opaque. `nil_open(engine, dir, cf_names, num_cfs, options, errptr)` takes `NIL_ENGINE_LSM` (1), `NIL_ENGINE_BTREE` (2) or `NIL_ENGINE_PGHEAP` (3); column families are numbered by position. pgheap reads the options `fillfactor`, `checkpoint_wal_bytes`, `autovacuum`, `autovacuum_threshold`, `autovacuum_scale_percent` and `autovacuum_naptime_ms`, and sizes its buffer pool from `cache_bytes`. Adding pgheap added no function: there are still 37.
+- Handles: `nil_db`, `nil_batch`, `nil_snapshot`, `nil_iter`, all opaque. `nil_open(engine, dir, cf_names, num_cfs, options, errptr)` takes `NIL_ENGINE_LSM` (1), `NIL_ENGINE_BTREE` (2) or `NIL_ENGINE_PGHEAP` (3); column families are numbered by position. pgheap reads the options `fillfactor`, `checkpoint_wal_bytes`, `autovacuum`, `autovacuum_threshold`, `autovacuum_scale_percent` and `autovacuum_naptime_ms`, and sizes its buffer pool from `cache_bytes`. Adding pgheap added no function. Phase 2 added two, `nil_checkpoint` and `nil_approximate_sizes`, for 39.
 - Errors: every call that can fail takes `char **errptr` and stores a malloc'd `"class: message"` string there (classes `io`, `corruption`, `invalid-argument`, `not-found`, `busy`, `closed`, `unsupported`, `panic`), freeing any string already present. `errptr` may be NULL.
 - Memory: values from `nil_get` and `nil_multi_get`, property strings and error strings are malloc'd and freed with `nil_free`. A found empty value is a non-NULL pointer with length 0. `nil_iter_key` and `nil_iter_value` return views valid until the next move.
-- Calls: `nil_batch_{new,put,delete,delete_range,merge,count,clear,destroy}`, `nil_write`, `nil_get`, `nil_multi_get`, `nil_snapshot_{new,seq,release}`, `nil_iter_{new,seek_to_first,seek_to_last,seek,seek_for_prev,next,prev,valid,key,value,status,destroy}`, `nil_flush`, `nil_flush_wal`, `nil_compact_range`, `nil_property`, `nil_latest_sequence`, `nil_engine_kind`, `nil_max_key_len`, `nil_version`, `nil_free`, `nil_close`.
+- Calls: `nil_batch_{new,put,delete,delete_range,merge,count,clear,destroy}`, `nil_write`, `nil_get`, `nil_multi_get`, `nil_snapshot_{new,seq,release}`, `nil_iter_{new,seek_to_first,seek_to_last,seek,seek_for_prev,next,prev,valid,key,value,status,destroy}`, `nil_flush`, `nil_flush_wal`, `nil_compact_range`, `nil_checkpoint`, `nil_approximate_sizes`, `nil_property`, `nil_latest_sequence`, `nil_engine_kind`, `nil_max_key_len`, `nil_version`, `nil_free`, `nil_close`.
 - Panics: every exported function runs its body under `catch_unwind`. A panic comes back as a `panic: ...` error, or, in calls without `errptr`, is stored in the batch or iterator and reported by `nil_write` or `nil_iter_status`. A batch that received a NULL pointer with a nonzero length is refused at `nil_write`.
 
 A throwaway C program compiled with `clang -std=c11 -Wall -Wextra -Werror` against the header and the archive opened both engines, wrote, read and iterated.
 
 ## Go binding
 
-`internal/nilengine` wraps the C interface with cgo (`#cgo LDFLAGS: ${SRCDIR}/../../rust/target/release/libnilengine.a`). `Kind` is `LSM`, `BTree` or `PgHeap`. Every file except `doc.go` carries `//go:build nilengine`, so without the tag the package is empty and `go test ./...` needs no Rust. The API follows `internal/store`: `Open(kind, dir, cfs, opts)`, `Batch` (`Put`, `Delete`, `DeleteRange`, `Merge`), `Write(b, sync)`, `Get`, `GetAt(snap, ...)`, `MultiGet`, `NewSnapshot`, `NewIterator(cf, IterOptions{Snapshot, Lower, Upper, FillCache})` with `Key`/`Value` views valid until the next move, `Flush`, `FlushWAL`, `CompactRange`, `Property`, `LatestSeq`. Errors are `*nilengine.Error` values that match the sentinels (`ErrBusy`, `ErrClosed`, ...) through `errors.Is`. A `DB` is safe for concurrent use and returns `ErrClosed` after `Close`. `MultiGet` copies keys into C memory because cgo forbids passing Go memory that holds Go pointers.
+`internal/nilengine` wraps the C interface with cgo (`#cgo LDFLAGS: ${SRCDIR}/../../rust/target/release/libnilengine.a`). `Kind` is `LSM`, `BTree` or `PgHeap`. Every file except `doc.go` carries `//go:build nilengine`, so without the tag the package is empty and `go test ./...` needs no Rust. The API follows `internal/store`: `Open(kind, dir, cfs, opts)`, `Batch` (`Put`, `Delete`, `DeleteRange`, `Merge`), `Write(b, sync)`, `Get`, `GetAt(snap, ...)`, `MultiGet`, `NewSnapshot`, `NewIterator(cf, IterOptions{Snapshot, Lower, Upper, FillCache})` with `Key`/`Value` views valid until the next move, `Flush`, `FlushWAL`, `CompactRange`, `Checkpoint(dir)`, `ApproximateSizes(cf, ranges)`, `Property`, `LatestSeq`. Errors are `*nilengine.Error` values that match the sentinels (`ErrBusy`, `ErrClosed`, ...) through `errors.Is`. A `DB` is safe for concurrent use and returns `ErrClosed` after `Close`. `MultiGet` copies keys into C memory because cgo forbids passing Go memory that holds Go pointers.
 
 ## Tests
 
 Commands, last run on 2026-09-28 with all three engines:
 
 ```
-make rust-test         # cargo test --workspace: 224 passed, 6 ignored (the soak runs)
+make rust-test         # cargo test --workspace: 240 passed, 6 ignored (the soak runs)
 make rust-soak         # the ignored soak tests, NILENGINE_SOAK=24 seeds each
-make nilengine-test    # go test -tags nilengine ./internal/nilengine: 6 tests, 12 engine subtests
+make nilengine-test    # go test -tags nilengine ./internal/nilengine: 7 tests, 15 engine subtests
 ```
 
-The 224 Rust tests: 9 in `nilengine-api`, 10 LSM, 5 B+ tree and 6 pgheap unit tests, 5 C interface tests, 8 LSM, 9 B+ tree and 10 pgheap internals tests, and the conformance suite, 27 cases run twice per engine (54 per engine, 162 in all). The second LSM run uses 256-byte blocks, a restart point every two keys, no bloom filter and an 8 KiB memtable; the second B+ tree run uses 512-byte pages, which makes trees four or five levels deep and puts most values in overflow chains; the second pgheap run uses a 32-frame (256 KiB) buffer pool, so pages are evicted and rewritten constantly, and a checkpoint every 64 KiB of WAL, so most crashes land soon after a checkpoint and replay pages from their full-page images. Both pgheap runs keep autovacuum on (every 50 ms), and every `compact_range` in the suite runs VACUUM.
+The 240 Rust tests: 10 in `nilengine-api`, 10 LSM, 5 B+ tree and 6 pgheap unit tests, 8 C interface tests, 8 LSM, 9 B+ tree and 10 pgheap internals tests, and the conformance suite, 29 cases run twice per engine (58 per engine, 174 in all). The second LSM run uses 256-byte blocks, a restart point every two keys, no bloom filter and an 8 KiB memtable; the second B+ tree run uses 512-byte pages, which makes trees four or five levels deep and puts most values in overflow chains; the second pgheap run uses a 32-frame (256 KiB) buffer pool, so pages are evicted and rewritten constantly, and a checkpoint every 64 KiB of WAL, so most crashes land soon after a checkpoint and replay pages from their full-page images. Both pgheap runs keep autovacuum on (every 50 ms), and every `compact_range` in the suite runs VACUUM.
 
 The conformance suite (`rust/conformance/src/cases.rs`) checks each engine against a `BTreeMap` per column family:
 
@@ -279,13 +283,15 @@ The conformance suite (`rust/conformance/src/cases.rs`) checks each engine again
 - reopen after close, a second open of a locked directory, reopening with families reordered or added
 - `i64add` merges, including failures that must leave the whole batch unapplied
 - a writer moving money between accounts while three readers check the total through snapshots and `multi_get`
+- a checkpoint taken while a writer runs: the copy must hold every batch acknowledged before the call and a prefix of the rest, none in part (a marker key written in each batch counts them); a checkpoint into an existing directory or under a missing parent fails; the copy takes writes of its own, and a checkpoint of the copy opens too
+- approximate sizes: 0 for empty, reversed and keyless ranges and for a family without the keys; each half of 3,000 keys between 10% and 90% of the whole range; 0 again after a delete-range and a compaction
 - crash recovery: batches with a counter key written in the same batch, some synced, then `crash` with dropped or partially kept unsynced writes; after reopen the counter says how many batches survived, which must include every synced batch, and the full state must equal the model after exactly that many batches. Fifteen crash cycles in one case run crash, reopen, write, crash again. A run of drop-unsynced crashes must lose at least one batch, so a hook that does nothing fails.
 
 The internals tests cover what the shared suite cannot see. For the LSM: data reaches levels below 0, compaction removes range tombstones (and keeps them while a snapshot needs them), a log truncated by 7 bytes recovers 9 of 10 batches, a log with a flipped byte recovers a prefix, open deletes orphan files, and a flipped byte in a table block reads as a corruption error. For the B+ tree: 20,000 random keys in 512-byte pages reach depth 4 or more, deleting three keys in four and large ranges keeps the tree correct, freed pages are reused, a snapshot blocks reuse until released, the free list is rebuilt at open, overflow pages are reused, and four hand-picked crashes: losing only the meta writes, losing only the tree pages under a surviving meta, and a data file cut 1000 bytes short (all three must fall back to the last synced commit), and keeping everything (must keep the newest commit).
 
 For pgheap: 5,000 updates of one key stay HOT and leave one index entry and one heap page, while a snapshot held for 50 of them still reads its version; updates of 1,900-byte values that no longer fit on their page add index entries until VACUUM removes all but one per key; values at the TOAST threshold stay inline and one byte more goes out of line, with chunk-boundary sizes and a 1 MiB value reading back before and after reopen and their chunks removed by VACUUM once replaced; VACUUM after deleting 2,000 rows leaves no dead tuples or index entries and the next 2,000 rows fit in the same pages; a snapshot held across 2,000 updates keeps all 2,000 old versions through VACUUM until it is released; autovacuum starts on its own and brings dead tuples under its threshold; an aborted batch and a flushed but uncommitted transaction whose pages a checkpoint wrote are both invisible after a crash; half of a heap page overwritten on disk after a crash comes back from its full-page image, and the same damage with no image to replay reads as a corruption error; crashes at each of four points inside a checkpoint recover every synced batch and a consistent prefix; and 34,000 transactions spanning two commit-log pages, one in 997 aborted, recover to exactly the model after a crash that tears unsynced writes.
 
-The soak tests (`make rust-soak`) ran 24 extra seeds of the randomized and crash cases under each of the six configurations on 2026-09-28 (B+ tree 57 s, LSM 410 s, pgheap 284 s). All passed. No engine code needed a fix after its first test run; the three failures seen during development were wrong expectations in tests: a fixed 100-byte key over the B+ tree's 85-byte limit at 512-byte pages, a C test expecting a key it had range-deleted, and a Go test expecting the B+ tree's transaction id to stay put when a column family is added.
+The soak tests (`make rust-soak`) ran 24 extra seeds of the randomized and crash cases under each of the six configurations on 2026-09-28 (B+ tree 57 s, LSM 410 s, pgheap 284 s), and again after the phase 2 changes (54 s, 398 s and 279 s). All passed. Before phase 2 no engine code needed a fix after its first test run; the three failures seen during development were wrong expectations in tests: a fixed 100-byte key over the B+ tree's 85-byte limit at 512-byte pages, a C test expecting a key it had range-deleted, and a Go test expecting the B+ tree's transaction id to stay put when a column family is added. Phase 2's checkpoint case found the first engine bug, in the LSM's `flush` (section "Phase 2", under "Fixes").
 
 ## Benchmarks
 
@@ -375,78 +381,181 @@ What the numbers show:
 
 ## Deferred and known gaps
 
-- Compression: neither engine compresses. RocksDB in NilDB uses LZ4 and ZSTD, so phase 2 disk use will be higher on the Rust engines.
+- Compression: no Rust engine compresses. RocksDB in NilDB uses LZ4 and ZSTD, so the Rust engines need more disk for the same data (not yet measured).
 - LSM: writers serialize on one mutex with one `write` call per commit (no group commit); no per-column-family memtables or options, prefix bloom filters, rate limiter, subcompactions or statistics counters; range tombstones live in the manifest, which suits NilDB's few drops but not millions of range deletes; every table file stays open.
 - B+ tree: 981-byte key limit at 4 KiB pages; open reads the whole file; the file never shrinks; single-key commits rewrite a root-to-leaf path (about 5 pages per commit in the benchmark); pages freed by unsynced commits wait for the next sync, which grew the 2,000,000-key fillrandom file to 437 MB.
 - pgheap: one writer at a time; delete-range costs O(keys in range); no TOAST compression; the heap file never shrinks; the commit log is never truncated; pruning runs only on the write path; no background writer; the phase-1 workloads have not been benchmarked on it.
-- All engines: no checkpoints, approximate sizes, read-only open or compaction filters yet (phase 2 items below); the C interface copies each value twice on the way to Go (Rust to malloc, malloc to Go) and has no pinned-read call.
+- All engines: no read-only open, and no compaction filters inside the engines (the store's sweeper does their work, section "Phase 2"); the C interface copies each value twice on the way to Go (Rust to malloc, malloc to Go) and has no pinned-read call.
 
-## Phase 2 plan: the engines behind `internal/store`
+## Phase 2: the engines behind `internal/store`
 
-The upper layers (`redis`, `cmddoc`, `query`, `analytics`, `admin`, `docstore`, `catalog`, `server`) keep calling `store.Store`, `store.Reader`, `store.Txn`, `store.Iterator` and `store.Snapshot` exactly as today. The engine work stays inside `internal/store`. Outside it, `internal/config` gains the flag, `cmd/nildb` passes it to the store, and `internal/admin` and `internal/server` change a few INFO lines (step 3). Those two need edits because `store.Version()` (the linked RocksDB version) and `store.ShimActive()` (RocksDB's read-options shim) are package-level functions, which cannot tell which engine a `Store` opened.
+Built on 2026-09-28. `nildb --engine lsm`, `btree` or `pgheap` runs the whole server on a Rust engine; `--engine rocksdb` is the default and behaves as before. The upper layers (`redis`, `cmddoc`, `query`, `analytics`, `admin`, `docstore`, `catalog`, `server`) still call `store.Store`, `store.Reader`, `store.Txn`, `store.Iterator` and `store.Snapshot` as before. Outside `internal/store`, `internal/config` gained the flag, `cmd/nildb` passes it to the store and logs the engine, and `internal/admin` and `internal/server` changed a few INFO fields, because the package-level `store.Version()` and `store.ShimActive()` cannot tell which engine a `Store` opened.
 
-### Step 1: an engine seam inside the package
+### The seam
 
-Add an unexported interface in `internal/store`, for example `kv`, with the calls the package makes on RocksDB today: open with the eight families, write a batch (with sync), get, multi-get, iterator with bounds and options, snapshot and release, flush, flush-WAL, compact-range, property, latest sequence, close. Move the grocksdb code (`store.go` open and close, `reader.go`, `iterator.go`, `snapshot.go`, `txn.go`, `admin.go`, `drop.go`, `options.go`, the filters, the merge operator, the read-options shim) behind a `rocksKV` implementation without changing its behaviour, and add `nilKV` over `internal/nilengine`. Everything that is NilDB logic rather than RocksDB stays above the seam and serves all engines: the layout marker check, the version generator, the snapshot registry with leases and the janitor, the lock manager, `ScheduleCompact`, `DeleteRanges`.
+`internal/store/kv.go` defines the unexported `kv` interface: point reads, multi-gets and iterators at the latest state or at a snapshot, write batches and `write(batch, sync)`, the EXEC transaction, snapshots, properties, approximate sizes, compact, flush, flush-WAL, checkpoint, latest sequence and close. `rocksKV` (`kv_rocks.go`, and `txn_wbwi.go` for `WriteBatchWI`) holds the grocksdb calls that `store.go`, `reader.go`, `iterator.go`, `snapshot.go`, `txn.go`, `admin.go` and `drop.go` made directly before, with the same options, filters, merge operator and read-options shim. `nilKV` (`kv_nil.go`, build tag `nilengine`) implements `kv` over `internal/nilengine`. NilDB logic stays above the seam and serves every engine: the layout marker, the version generator, the snapshot registry with leases and the janitor, the lock manager, `ScheduleCompact`, `DeleteRanges`, the overlay transaction and the sweeper.
 
-`store.Config` gains `Engine string` (`"rocksdb"` default, `"lsm"`, `"btree"`). `nilKV` compiles only with `-tags nilengine`; without the tag, `Open` with `lsm` or `btree` fails with "built without nilengine", so the default build still needs no Rust. The store writes an `ENGINE` file into a new directory and refuses to open a directory with another engine's marker; the LSM's `CURRENT` and `MANIFEST-*` names would otherwise collide with RocksDB's. A directory without the file belongs to RocksDB, so today's data directories and RocksDB checkpoints open unchanged. `Checkpoint` writes the marker into the checkpoint directory after the engine call, and `OpenReadOnly` (`--readonly`) runs the same check, so an LSM checkpoint cannot be opened as RocksDB. The LSM's open-time cleanup deletes only `*.log`, `*.sst`, `MANIFEST-*` and `*.tmp` files, and the B+ tree touches only `data.nbt` and `LOCK`, so neither engine removes the marker.
+`store.Config.Engine` takes `rocksdb` (the default), `lsm`, `btree` or `pgheap`. In a build without the tag, `kv_nil_stub.go` makes `Open` with a Rust engine fail with "store: --engine lsm needs a nildb built with -tags nilengine (make build-engines); this build has rocksdb only", so `make build` and `make test` still need no Rust.
 
-The seam also adds three methods for the callers of the package-level functions: `(*Store).Engine()` returns `"rocksdb"`, `"lsm"` or `"btree"`; `(*Store).EngineVersion()` returns RocksDB's version or `nil_version()`; `(*Store).ShimActive()` returns the package-level result under RocksDB and false with the reason "engine lsm has no rate limiter" (or `btree`) otherwise. `store.Version()` and `store.ShimActive()` stay, because RocksDB is still linked.
+Exported additions, with no removals or signature changes: `Config.Engine`; the constants `EngineRocksDB`, `EngineLSM`, `EngineBTree` and `EnginePgHeap` and the list `Engines`; `ErrUnsupported`; the methods `(*Store).Engine()`, `(*Store).EngineVersion()` and `(*Store).ShimActive()`; and `TestEngine()`, which returns `$NILDB_TEST_ENGINE` (`rocksdb` when unset) for the tests of every package. `store.Version()` and the package-level `store.ShimActive()` stay, because RocksDB is still linked; `internal/admin` and `internal/server` now call the methods.
 
-### Step 2: map every RocksDB feature `internal/store` relies on
+### The ENGINE marker
 
-**Compaction filters (expiry and garbage).** RocksDB runs `metaFilter` (expired metadata and version-map entries 300 s past expiry), `subFilter` (sub and zscore entries whose version has no live version-map entry, versions younger than 60 s skipped, a 64-slot verdict cache) and `idFilter` (entries of dropped `coll_id`/`idx_id` per the `LiveSet`). Neither Rust engine has filters, and the B+ tree has no compaction to host them. Phase 2 adds one Go-side sweeper, a store janitor job that serves both Rust engines:
-- sub and zscore: skip-scan the distinct 8-byte version prefixes (seek to `version + 1` after each), look each up in the version map with `subFilter`'s rules, and delete-range `[version, version + 1)` for dead ones. No lock is needed because a version is never reused.
-- doc, idx, geo, col: skip-scan the 4-byte id prefixes and delete-range ids the `LiveSet` reports dead, the job `idFilter` does as a backstop today.
-- meta: scan under a snapshot for entries expired past the grace period, then delete each one under its `LockRedis` stripe after re-reading it, because a writer may recreate the key between scan and delete (the filter avoids that race by working on old versions; a new tombstone would not).
-The sweeper runs every 10 minutes by default with a byte budget per round. On the LSM its range deletes cost O(1) and compaction reclaims the space; on the B+ tree they free whole subtrees. Porting the three filters into the LSM's compaction loop as built-in filters (the Go side pushing the live id set through a new C call) is a later optimization, not a phase 2 requirement.
+`Open` writes `ENGINE`, the engine's name and a newline, into a new or empty directory through a synced temporary file and a rename, and refuses a directory whose marker names another engine: "store: DIR holds a btree database (its ENGINE file says so); open it with --engine btree". The LSM's `CURRENT` and `MANIFEST-*` names would otherwise collide with RocksDB's. A directory that holds files but no marker belongs to RocksDB, so data directories and checkpoints from before phase 2 open unchanged with `--engine rocksdb`, and a Rust engine refuses them. `Checkpoint` writes the marker into the new checkpoint after the engine call, for RocksDB too, and `OpenReadOnly` runs the same check without writing anything. The LSM's open-time cleanup deletes only `*.log`, `*.sst`, `MANIFEST-*` and `*.tmp` files, the B+ tree touches only `data.nbt` and `LOCK`, and pgheap only its own files and subdirectories, so no engine removes the marker.
 
-**Merge operator.** Done: both engines implement `i64add` natively. `Txn.Merge` keeps rejecting families other than `default`.
+### RocksDB features and what the Rust engines do instead
 
-**`WriteBatchWI` for MULTI/EXEC read-your-writes.** `server/multi.go` and `cmddoc` call `BeginIndexed`. For the Rust engines, `store` gets a Go overlay transaction: an ordered map per family (a small skip list keyed by family and key) holding each key's latest put, delete or pending merge operands, plus the operation log in order. `Get` reads the overlay, then the engine, applying pending `i64add` operands to the base value. `Iter` merges an overlay iterator with the engine iterator in both directions and inside the bounds, the job `NewIteratorWithBase` does. `Commit` writes the log as one batch. `DeleteRange` keeps returning `ErrRangeInIndexedTxn`, as with RocksDB. The overlay needs no C support and could later serve RocksDB too.
+**Compaction filters.** RocksDB runs `metaFilter` (expired metadata and version-map entries), `subFilter` (sub and zscore entries of dead collection versions) and `idFilter` (entries of dropped `coll_id` and `idx_id` values) inside its compactions. The Rust engines have no filters, so `sweeper.go` does the same work in Go with the filters' rules and constants (300 s of grace after expiry; versions younger than 60 s kept):
+- meta: it scans for metadata and version-map entries expired past the grace period, then, 256 at a time, takes their `LockRedis` stripes, re-reads each entry, deletes the ones still expired and commits before releasing the locks, so a key a writer re-created since the scan survives.
+- sub and zscore: it skips from one 8-byte version prefix to the next and looks each version up in the version map. A dead version with up to 1,024 entries loses them to point deletes and a larger one gets one range delete, because the LSM keeps range tombstones in its manifest until a compaction covers them, and one per small collection would pile up there. No lock is needed because a version is never reused.
+- doc, idx, geo and col: it skips from one 4-byte id to the next and range-deletes the ids the published `LiveSet` reports dead. Without a `LiveSet` it deletes nothing, as `idFilter` does.
 
-**Prefix extractors and filters.** `sub` and `zscore` use an 8-byte fixed prefix and `geo` a 12-byte one, with memtable prefix blooms and Ribbon filters (whole-key off on `zscore` and `geo`). The Rust engines have no prefix mode, so every iterator is total order: `IterOpts.TotalOrderSeek` becomes a no-op, and `PrefixSameAsStart` (geo ancestor probes) turns into an upper bound at the prefix's successor, computed in `store` before the call. Whole-key bloom filters serve point reads on the LSM. A bounded scan inside one collection touches one file per level at 1 and below, because files there are range-partitioned; a per-file prefix filter for level-0 files is a follow-up if profiles show level 0 in the way.
+A janitor goroutine runs a round every 10 minutes. A round reads at most 256 MiB of keys and values, commits its deletes 1,024 per batch and records where it stopped, and the next round starts there. After a round, pgheap runs VACUUM on each family the round deleted from, since every deleted row is a dead tuple; on the LSM and the B+ tree each range delete schedules a compaction of its range, as drops do. `Compact`, and so `ROCKS.COMPACT`, first sweeps the requested range with no budget, which drops what RocksDB's filters would drop in the same compaction. A store opened read-only does not sweep.
 
-**Checkpoints.** `ROCKS.CHECKPOINT` uses `CreateCheckpoint(dir, 0)`, and `--readonly` opens a checkpoint with `OpenDbForReadOnlyColumnFamilies`. New engine calls: `nil_checkpoint(db, dir)`. For the LSM it flushes the memtable, hard-links every live table file into `dir` and writes a manifest and `CURRENT` there; table files are immutable, as RocksDB's checkpoint relies on. For the B+ tree it holds a snapshot, clones `data.nbt` with APFS `clonefile` (copying on other file systems), and writes a meta page for the snapshot's roots into the copy. A read-only open flag follows (shared `flock`, no writes, no background threads). `ExportCF` and `Ingest` stay RocksDB-only.
+**Merge operator.** All three engines resolve `i64add` at commit (section "Engine API"). `Txn.Merge` still rejects families other than `default`.
 
-**Properties.** Both engines answer `rocksdb.estimate-num-keys`, `rocksdb.num-snapshots`, `rocksdb.block-cache-usage`, `rocksdb.block-cache-capacity` and `rocksdb.stats`. The LSM also answers `rocksdb.num-files-at-level<N>`, `rocksdb.total-sst-files-size`, `rocksdb.cur-size-all-mem-tables`, `rocksdb.cur-size-active-mem-table`, `rocksdb.num-immutable-mem-table`, `rocksdb.estimate-pending-compaction-bytes` and `rocksdb.oldest-snapshot-sequence`. Other names return nothing, which `store.Property` already reports as absent; `IntProperty` parses the string. `rocksdb.oldest-snapshot-time` comes from the store's own registry.
+**MULTI/EXEC read-your-writes.** `server/multi.go` and `cmddoc` call `BeginIndexed`, which on RocksDB returns a `WriteBatchWI` transaction; on the Rust engines `txn_overlay.go` stands in. Each write goes into the engine batch, in order, and into a per-family overlay that keeps the key's latest put or delete and the `i64add` operands after it; the overlay sorts its keys when an iterator first needs them. `Get` and `MultiGet` look in the overlay first and fold pending operands into the committed value with the engines' rules (a missing value counts as 0, two's-complement wraparound, a value or operand of another length than 8 fails). `Iter` merges the overlay with an engine iterator in both directions and inside the bounds, the job `NewIteratorWithBase` does for RocksDB, and it also resolves pending merges while iterating `default`, which RocksDB's base-delta iterator does not. `DeleteRange` returns `ErrRangeInIndexedTxn`, as on RocksDB. `Commit` writes the batch once, and the engine resolves the merges.
 
-`internal/admin` reads nine more names: `rocksdb.estimate-live-data-size`, `rocksdb.live-sst-files-size`, `rocksdb.size-all-mem-tables`, `rocksdb.num-entries-active-mem-table`, `rocksdb.mem-table-flush-pending`, `rocksdb.compaction-pending` and `rocksdb.block-cache-pinned-usage` for `ROCKS.CF INFO`, which skips a name the engine does not report, and `rocksdb.num-running-flushes` and `rocksdb.num-running-compactions` for the INFO `rocksdb` section, which prints 0 for one. Phase 2 adds all nine to the LSM, which has the flush and compaction threads, memtables and version to answer them. On the B+ tree they stay absent, since it has no memtable, table files or compaction. With one cache per engine, the INFO `analytics_cache_*` fields repeat the main cache's figures.
+**Prefix extractors.** On RocksDB `sub` and `zscore` have an 8-byte prefix extractor and `geo` a 12-byte one, with prefix blooms and Ribbon filters. The Rust engines iterate in total order, so `TotalOrderSeek` changes nothing. `PrefixSameAsStart` (the geo ancestor probes) becomes a check in the store's iterator wrapper, which stops the iterator once a key no longer starts with the prefix of the last seek target. The plan proposed an upper bound at the prefix's successor; the wrapper cannot set one, because it learns the prefix at the seek, after the engine iterator and its bounds exist. Point reads on the LSM use its whole-key bloom filters.
 
-`ApproxSizes` feeds the query planner (`query/planner.go`) and `DOC.STATS`, so phase 2 adds `nil_approximate_sizes`: the LSM sums the bytes of overlapping files, prorated by key range, plus the memtable share; the B+ tree estimates from key counts and the depth.
+**Checkpoints.** New engine call `checkpoint(dir)`, through `nil_checkpoint` and `DB.Checkpoint`. Each engine builds the copy in `dir.tmp` and renames it to `dir`, so a crash never leaves a partial checkpoint under `dir`, and writers keep running during the copy:
+- LSM: flush the memtables, take the current version under the version lock, hard-link its table files (copying a file whose link fails), then write a manifest holding that version and `CURRENT`.
+- B+ tree: hold the current tree, copy `data.nbt` (a clone on APFS), cut the copy to the held tree's page count and rewrite both meta pages to name its roots.
+- pgheap: a base backup. Holding the checkpoint lock, it runs a checkpoint, copies `pg_control`, the catalog, the relation files and the commit log, then writes out and copies the WAL. The copied `pg_control` still says "running", so opening the copy replays the WAL from the redo pointer and restores any page copied half-changed from its full-page image.
 
-**Rate limiter and the priority shim.** `IterOpts.LowPriority` reaches RocksDB through the cgo shim that sets `rate_limiter_priority = IO_LOW`, and the rate limiter caps background I/O at 200 MiB/s. The Rust engines have neither; `(*Store).ShimActive()` (step 1) reports false with the reason "engine lsm has no rate limiter", the answer the package-level check already gives when the shim's self-check fails, and `internal/admin` switches its two calls (`ROCKS.INFO` and the INFO `rocksdb` section) to the method. A token bucket for LSM flush and compaction writes, with low-priority reads charged to it, is a follow-up.
+**Approximate sizes.** New engine call `approximate_sizes(cf, ranges)`, through `nil_approximate_sizes` and `DB.ApproximateSizes`; `Store.ApproxSizes` passes the figures to the query planner (`query/planner.go`), `DOC.STATS` and `ROCKS.SIZES`. The LSM counts table files only, as RocksDB's `GetApproximateSizes` does by default, summing over the overlapping files the distance between the data blocks that hold the two ends; the plan's memtable share is left out, as RocksDB leaves it out. The B+ tree estimates each end's rank from one root-to-leaf descent and multiplies the share of keys between them by the key count and the average entry size of the two leaves reached. pgheap takes the share of index entries between the ends, from one descent per end, times the bytes of the family's heap and TOAST heap. A range that holds no key is exactly 0 on every engine.
 
-**Other iterator options.** `FillCache` maps to `fill_cache`. `Readahead` and `AsyncIO` are ignored; the operating system reads ahead. `Deadline` is RocksDB's `ReadOptions` deadline today (`iterator.go`). For the Rust engines the store's iterator wrapper enforces it, checking the clock every 64 moves and failing with an error whose text contains `timed out`, which `readErr` in `query/op.go` already maps to `ErrTimeout`.
+**Properties.** The Rust engines answer `rocksdb.estimate-num-keys`, `rocksdb.num-snapshots`, `rocksdb.block-cache-usage`, `rocksdb.block-cache-capacity` and `rocksdb.stats`, and the store answers `rocksdb.oldest-snapshot-time` from its own registry. The LSM also answers `rocksdb.num-files-at-level<N>`, `total-sst-files-size`, `cur-size-all-mem-tables`, `cur-size-active-mem-table`, `num-immutable-mem-table`, `estimate-pending-compaction-bytes` and `oldest-snapshot-sequence`, and phase 2 gave it the nine names `internal/admin` reads: `estimate-live-data-size`, `live-sst-files-size`, `size-all-mem-tables`, `num-entries-active-mem-table`, `mem-table-flush-pending`, `compaction-pending`, `block-cache-pinned-usage` (always 0), `num-running-flushes` and `num-running-compactions`. The B+ tree and pgheap leave those nine absent; `ROCKS.CF INFO` skips an absent name and the INFO `rocksdb` section prints 0. With one cache per engine, the INFO `analytics_cache_*` fields repeat the main cache's figures.
 
-**Column-family options, caches and the write buffer manager.** Per-family write buffers, per-level compression, periodic compaction, the two HyperClockCaches and the `WriteBufferManager` have no counterpart. `BlockCacheBytes` maps to `cache_bytes`, `WriteBufferBytes` to `write_buffer_size` (one memtable budget for all families), and `AnalyticsCacheBytes` is ignored because each engine has one cache.
+**Rate limiter.** `IterOpts.LowPriority` reaches RocksDB's rate limiter through the cgo read-options shim, which sets `rate_limiter_priority = IO_LOW`. The Rust engines have no rate limiter, so `LowPriority` reads run like any other, and `(*Store).ShimActive()` returns false with "engine lsm has no rate limiter" (or `btree`, `pgheap`), which `ROCKS.INFO` and the INFO `rocksdb` section report.
 
-**Durability.** `--fsync always` sets `sync` per commit, `everysec` keeps its ticker calling `FlushWAL(true)`, `no` does nothing. The B+ tree keeps its tree intact without syncs and additionally syncs every `max_unsynced_free_pages` freed pages.
+**Other iterator options.** `FillCache` maps to `fill_cache`; `Readahead` and `AsyncIO` change nothing. The store's iterator wrapper enforces `Deadline`: it checks the clock every 64 moves and fails with "store: iterator deadline passed: operation timed out", which `readErr` in `query/op.go` maps to `ErrTimeout`.
 
-**The rest.** `SetOption`, `Ingest` and `ExportCF` return a new `store.ErrUnsupported` whose text reads "not supported with --engine lsm" (or `btree`). `Stats` returns the `nil.stats` property with or without `--rocks-stats`, because `Config.Statistics` only switches on RocksDB's optional counters and the engines keep none. `ROCKS.INFO` reports `EngineVersion()` as its `version` and adds an `engine` field. `LatestSeq` maps to `latest_sequence`, which on the B+ tree is a transaction id: it still grows with every commit, which is all that `ROCKS.SEQ` and the checkpoint reply promise. `ScheduleCompact` calls `compact_range`, a no-op on the B+ tree.
+**Options.** `BlockCacheBytes` becomes `cache_bytes` and `WriteBufferBytes` becomes `write_buffer_size`: one cache and one memtable budget for all eight families. `AnalyticsCacheBytes`, per-family write buffers, per-level compression, periodic compaction, the two HyperClockCaches and the `WriteBufferManager` have no counterpart.
 
-### Step 3: the `--engine` flag and `ROCKS.*`
+**Durability.** `--fsync always` syncs every commit, `everysec` keeps its ticker calling `FlushWAL(true)`, and `no` leaves syncing to each engine's own schedule. Every engine hands a commit to the operating system before `write` returns, so a process crash loses no acknowledged write under any policy; the store crash test below checks it.
 
-`cmd/nildb` gets `--engine rocksdb|lsm|btree` (default `rocksdb`), passed through `internal/config` into `store.Config.Engine`. INFO's server section (`internal/server/info.go`) gains `nildb_engine:` and `nildb_engine_version:` next to `nildb_rocksdb_version`, which keeps naming the linked library. The INFO `rocksdb` section's `rocksdb_version` reports `EngineVersion()`, and the startup log line names the engine instead of always printing the RocksDB version.
+**Read-only opens.** On a Rust engine `--readonly` opens the directory with the engine's normal open plus `create_if_missing=false`; the store then refuses writes, flushes and compactions with "store: opened read-only" and runs no sweeper. The engine's recovery can still write into the directory (the LSM writes a new manifest and log after replay, pgheap an end-of-recovery checkpoint), so the read-only open the plan called for is deferred.
 
-| Command | With `--engine lsm` or `btree` |
+**The rest.** `Stats`, behind `ROCKS.STATS`, returns the `nil.stats` text of every family with or without `--rocks-stats`, because `Config.Statistics` only switches on RocksDB's optional counters and the Rust engines keep their counters anyway. On pgheap it ends with "oldest xmin N, registered snapshots M", the two figures that show what holds VACUUM back. `LatestSeq` maps to `latest_sequence`, which on the B+ tree and pgheap is a transaction id; it still grows with every commit, which is all that `ROCKS.SEQ` and the checkpoint reply promise. `ScheduleCompact` calls `compact_range`: a compaction on the LSM, VACUUM on pgheap, a no-op on the B+ tree.
+
+### The flag, INFO and `ROCKS.*`
+
+`--engine` takes `rocksdb` (the default), `lsm`, `btree` or `pgheap`; `internal/config` checks the value and `cmd/nildb` passes it to `store.Config.Engine`. The startup log line reads "listening on ADDR, data in DIR, fsync POLICY, engine NAME VERSION". INFO's server section adds `nildb_engine` and `nildb_engine_version` next to `nildb_rocksdb_version`, which still names the linked RocksDB. The INFO `rocksdb` section's `rocksdb_version` and `ROCKS.INFO`'s `version` report `EngineVersion()`, and `ROCKS.INFO` gained an `engine` field, so its reply has 30 elements in RESP2 (28 before) and 15 pairs in RESP3 (14 before).
+
+| Command | With `--engine lsm`, `btree` or `pgheap` |
 |---|---|
-| `ROCKS.CF`, `ROCKS.COMPACT`, `ROCKS.FLUSH`, `ROCKS.FLUSHWAL`, `ROCKS.GET`, `ROCKS.SCAN`, `ROCKS.SEQ`, `ROCKS.SNAPSHOT` | work as today through the engine calls |
-| `ROCKS.PROPERTY`, `ROCKS.STATS`, `ROCKS.INFO` | work with the names and text the engine provides |
-| `ROCKS.SIZES` | works once `nil_approximate_sizes` lands |
-| `ROCKS.CHECKPOINT dir` | works once `nil_checkpoint` lands; `ROCKS.CHECKPOINT dir CF cf` stays RocksDB-only |
-| `ROCKS.INGEST`, `ROCKS.SETOPTION` | RocksDB-only; reply `ERR not supported with --engine lsm` (or `btree`) |
+| `ROCKS.CF`, `ROCKS.FLUSH`, `ROCKS.FLUSHWAL`, `ROCKS.GET`, `ROCKS.SCAN`, `ROCKS.SEQ`, `ROCKS.SNAPSHOT`, `ROCKS.PROPERTY`, `ROCKS.INFO`, `ROCKS.STATS`, `ROCKS.SIZES` | work through the engine calls, with the property names and text the engine provides |
+| `ROCKS.COMPACT` | sweeps the range, then compacts it: a compaction on the LSM, VACUUM of the whole family on pgheap, nothing more on the B+ tree |
+| `ROCKS.CHECKPOINT dir` | works through `nil_checkpoint` and writes the `ENGINE` marker |
+| `ROCKS.CHECKPOINT dir CF cf`, `ROCKS.INGEST`, `ROCKS.SETOPTION` | RocksDB-only; reply `ERR not supported with --engine lsm` (or `btree`, `pgheap`) |
 
-The names stay `ROCKS.*` so scripts written against RocksDB keep working. The RocksDB-only replies need no new code in `internal/admin`: its `storeErr` prefixes `ERR ` to any store error it does not map, so the text of `store.ErrUnsupported` becomes the reply.
+The names stay `ROCKS.*` so scripts written against RocksDB keep working. `internal/admin`'s `storeErr` prefixes `ERR ` to any store error it does not map, so the text of `store.ErrUnsupported` became the reply without new code there.
 
-### Step 4: tests and measurements
+### What stayed RocksDB-only
 
-- Run `internal/store`'s tests against all three engines, choosing the engine from `NILDB_TEST_ENGINE` under the `nilengine` tag. Tests of RocksDB-only features (`Ingest`, `SetOption`, filter verdicts) skip on the Rust engines; the sweeper gets its own tests.
-- Run the server-level tests in `internal/testutil`, the `ROCKS.*` and INFO tests in `internal/admin` and the binary tests in `cmd/nildb` with `--engine lsm` and `--engine btree`.
-- Keep the Rust conformance suite as the engines' gate, and add a store-level crash test: kill the server process during a write load and check that every acknowledged `--fsync always` write survives.
-- Repeat the benchmark above through `store` and add `redis-benchmark -P 16` and `cmd/htapbench` runs per engine.
+- `Store.Ingest`, `Store.SetOption` and `Store.ExportCF`, behind `ROCKS.INGEST`, `ROCKS.SETOPTION` and `ROCKS.CHECKPOINT dir CF cf`. On the Rust engines they return `ErrUnsupported`.
+- RocksDB's statistics dump, which `--rocks-stats` switches on.
+- The rate limiter (200 MiB/s of background I/O by default) and IO_LOW for `LowPriority` reads.
+- Per-family options: write buffers, LZ4 and ZSTD compression, periodic compaction, prefix extractors with prefix blooms and Ribbon filters, the two HyperClockCaches and the write buffer manager.
+- Filters that run inside compactions. The Rust engines rely on the sweeper.
 
-Order: the seam with `rocksKV` first, with no behaviour change and the existing test suite green; then `nilKV` with the overlay transaction, the flag and the engine-aware INFO fields; then approximate sizes, the sweeper and checkpoints; the rate limiter and compaction-loop filters last.
+### Build targets
+
+`make build-engines` builds `libnilengine.a`, then `bin/nildb` with `-tags nilengine`, which runs on any of the four engines. `make test-engines` runs `go test -tags nilengine -count=1 ./...` once per engine with `NILDB_TEST_ENGINE` set, and `ENGINE_PKGS` narrows the packages. `make bench-engines` runs `BenchmarkServer` in `cmd/nildb` once per engine, `BENCH_COUNT` times (default 3) with `BENCH_OPS` operations per run (default `20000x`). `make build`, `make test` and `make vet` are unchanged and need no Rust.
+
+### Phase 2 tests
+
+Commands, run on 2026-09-28:
+
+```
+make vet             # go vet ./...: clean; go vet -tags nilengine ./... is clean too
+make test            # the default build, no Rust: every package passes
+make test-engines    # the table below
+make nilengine-test  # 7 tests, 15 engine subtests
+make rust-test       # 240 passed, 6 ignored
+make rust-soak       # the 6 soak tests pass
+cd rust && cargo clippy --workspace --all-targets   # no warnings
+```
+
+`make test-engines`, every package under `-tags nilengine`:
+
+| Engine | Tests passed | Tests skipped | Subtests passed | Subtests skipped |
+|---|---:|---:|---:|---:|
+| rocksdb | 440 | 3 | 788 | 0 |
+| lsm | 439 | 4 | 785 | 3 |
+| btree | 439 | 4 | 784 | 4 |
+| pgheap | 439 | 4 | 784 | 4 |
+
+Nothing fails on any engine, and every skip names its reason:
+- `TestCrashChild` skips on every engine unless the crash test runs it as a child process.
+- On RocksDB the two tests of Rust-engine behaviour skip: `TestAdminCallsUnsupported` and `TestSweeperRunsOnItsOwn`.
+- On the Rust engines the store tests of RocksDB-only features skip: `TestAdminCallsRocksDB` (SetOption, ExportCF, Ingest and RocksDB's statistics dump), `TestFilterRace` (RocksDB subcompactions against the shared filter) and `TestShimRoundTrip` (reads `rate_limiter_priority` through grocksdb), plus three subtests that open or write a database with grocksdb itself (`TestCheckpointOpenReadOnly/raw_open`, `TestEightColumnFamilies/rocksdb_families`, `TestLayoutMarkerChecks/foreign_data`).
+- On the B+ tree and pgheap, `TestKeysLongKeyAndPatterns/50000-byte_key` in `internal/redis` checks that the server refuses the key with an error and still answers PING, then skips: the B+ tree takes keys up to 981 bytes and pgheap up to 2,000.
+
+New tests:
+- `TestCrashKeepsAcknowledgedWrites` (store, every engine) runs the test binary as a child process that commits batches in a loop (a row, an `i64add` count and the batch's number) and prints "ack N" after each commit. It kills the child with SIGKILL 40 to 200 batches later, reopens the store, and checks that every acknowledged batch survived and that the store holds a prefix of the batches with none in part. Four kill cycles run under `--fsync always` and four under `no`; the test took 7 to 12 s per engine.
+- `TestIndexedTxnMatchesModel` (store, every engine) runs 25 transactions of 80 random operations (puts, deletes, merges into counters, gets, multi-gets and iterator walks) through `BeginIndexed` and through the overlay directly, including on RocksDB, and compares every read with a model; after each commit or discard the store must hold exactly the model.
+- Five sweeper tests: expired metadata and dead versions go while live ones stay; dropped ids go; a round stays within its byte budget and the next resumes where it stopped; keys a writer re-creates under their locks while rounds run survive; and the background sweeper runs on its own (Rust engines only).
+- `TestCheckpointAndApproximateSizes` in `internal/nilengine`, and the two conformance cases listed under "Tests".
+
+### Fixes
+
+- The LSM's `flush` waited until the immutable-memtable list was empty. Under a steady writer the list never emptied, and the checkpoint conformance case hung for more than 15 minutes. `flush` now switches the memtable and waits only until that memtable, the newest immutable one, has left the list; memtables flush oldest first, so every write before the call has reached a table by then.
+- `Err()` on a Rust-engine iterator after `Close` read the freed engine iterator and reported "nil_iter handle is NULL"; the wrapper now records the close.
+
+### Benchmark: the server end to end
+
+`make bench-engines` ran on 2026-09-28 from 17:56 to 17:59 CDT on the machine of the phase-1 benchmarks: Apple M3 Max (10 performance and 4 efficiency cores), 36 GiB, macOS 27.2, APFS. Go 1.27.1, Rust 1.98.1, RocksDB 11.8.1. Other agents may have been using the machine at the same time.
+
+`BenchmarkServer` (`cmd/nildb/bench_test.go`) starts `nildb`, built with `-tags nilengine`, with `--engine` and otherwise default flags (`--fsync everysec`, 512 MiB cache, 256 MiB write buffer), and drives it over loopback TCP with go-redis v9: one client per run, RESP2, a pool of one connection per goroutine, no retries. Each run spreads 20,000 operations over 1, 8 or 32 goroutines and uses keys no earlier run touched:
+- SET writes a new key with a 100-byte value.
+- GET reads one of 10,000 keys loaded before the timer starts.
+- INCR increments one of 1,000 counters.
+- HSET writes a new 100-byte field into one of 1,000 hashes.
+- ZADD adds a new member to one of 100 sorted sets.
+- DOCMIX alternates DOC.INSERT of a new three-field document with DOC.FIND by `_id` of one of 10,000 documents loaded before the timer starts.
+
+Operations per second, median of three runs:
+
+| Workload | Clients | RocksDB | LSM | B+ tree | pgheap |
+|---|---:|---:|---:|---:|---:|
+| SET | 1 | 25,557 | 26,290 | 17,773 | 23,093 |
+| SET | 8 | 62,048 | 64,996 | 25,817 | 57,166 |
+| SET | 32 | 72,366 | 70,906 | 23,769 | 62,334 |
+| GET | 1 | 31,662 | 35,370 | 31,952 | 31,537 |
+| GET | 8 | 69,420 | 69,611 | 67,338 | 69,650 |
+| GET | 32 | 80,065 | 83,255 | 74,028 | 81,960 |
+| INCR | 1 | 25,342 | 25,732 | 13,523 | 24,512 |
+| INCR | 8 | 62,101 | 64,805 | 20,130 | 55,207 |
+| INCR | 32 | 69,969 | 70,793 | 19,806 | 58,019 |
+| HSET | 1 | 22,892 | 24,090 | 9,217 | 21,611 |
+| HSET | 8 | 60,733 | 61,677 | 11,491 | 47,866 |
+| HSET | 32 | 71,583 | 68,645 | 11,380 | 52,887 |
+| ZADD | 1 | 22,527 | 22,502 | 6,673 | 20,271 |
+| ZADD | 8 | 58,461 | 60,784 | 7,690 | 45,623 |
+| ZADD | 32 | 73,052 | 66,883 | 7,614 | 47,632 |
+| DOCMIX | 1 | 21,815 | 22,408 | 15,673 | 15,878 |
+| DOCMIX | 8 | 57,824 | 60,845 | 31,191 | 38,018 |
+| DOCMIX | 32 | 73,800 | 69,728 | 28,846 | 38,827 |
+
+The slowest of the three runs stayed within 1.17 times the fastest in 69 of the 72 configurations. pgheap varied most: DOCMIX at 8 and 32 clients (1.53 and 1.55 times) and HSET at 32 clients (1.41 times).
+
+What the numbers show:
+
+- The LSM keeps pace with RocksDB on every workload, from 8% slower (ZADD, 32 clients) to 12% faster (GET, 1 client).
+- GET runs at about the same rate on all four engines: 31,500 to 35,400 per second with one client and 74,000 to 83,300 with 32.
+- With one client pgheap is at most 10% slower than RocksDB, except on DOCMIX (27% slower). Its writes scale less with clients: with 32 clients it runs HSET at 74%, ZADD at 65% and DOCMIX at 53% of RocksDB's rate, and ZADD barely moves from 8 clients (45,623) to 32 (47,632). pgheap runs one batch at a time behind its writer lock.
+- The B+ tree writes slowest and gains little from more clients: SET peaks at 25,817 per second with 8 clients, HSET stays between 9,200 and 11,500 and ZADD between 6,700 and 7,700. Each commit copies the root-to-leaf path of every tree it changes, one commit at a time, and a ZADD of a new member changes three families: its sub entry, its zscore entry and the set's size.
+
+### Deferred
+
+- A read-only open in the engines: a shared `flock`, no recovery writes and no background threads. Until then `--readonly` on a Rust engine can write recovery state into the directory.
+- Filters inside the LSM's compaction loop, fed the live id set through a new C call, to spare the sweeper's scans there.
+- A token bucket for LSM flush and compaction writes, with `LowPriority` reads charged to it.
+- Splitting large delete-ranges on pgheap into janitor batches of a few thousand keys. A drop still sets xmax on every row in one batch under the writer lock.
+- `redis-benchmark -P 16` and `cmd/htapbench` per engine. `redis-benchmark` is not installed; ask Arka before `brew install redis`.
+- Compression in the Rust engines, and a pinned-read C call so values stop being copied twice on the way to Go.
 
 ## Sources
 
