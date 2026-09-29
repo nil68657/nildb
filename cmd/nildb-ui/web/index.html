@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>NilDB console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111418'/%3E%3Cpath d='M9 23V9l14 14V9' fill='none' stroke='%236aa8ff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
+<script src="/js/theme.js"></script>
+<script type="module" src="/js/main.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="#/overview" aria-label="NilDB console, overview">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" class="brand-tile"/><path d="M9 23V9l14 14V9" class="brand-mark"/></svg>
+      <span>NilDB</span>
+    </a>
+    <div class="conn" id="conn" role="status" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span><span class="conn-text">Connecting</span>
+    </div>
+    <span class="pill pill-warn" id="ro-badge" hidden title="nildb-ui was started with --readonly">read-only</span>
+    <div class="grow"></div>
+    <label class="db-pick" title="Database for Keys, Console and Geo">
+      <span class="db-pick-label">db</span>
+      <select id="db-select" aria-label="Database"></select>
+    </label>
+    <button class="palette-btn" id="palette-btn" type="button" aria-keyshortcuts="Meta+K Control+K">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>
+      <span class="palette-btn-text">Search keys, collections, commands</span>
+      <kbd id="palette-kbd">⌘K</kbd>
+    </button>
+    <button class="icon-btn" id="theme-btn" type="button" aria-label="Switch to light theme"></button>
+  </header>
+  <nav class="sidebar" id="nav" aria-label="Views"></nav>
+  <main id="main" tabindex="-1"></main>
+</div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>
