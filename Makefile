@@ -100,3 +100,14 @@ bench-engines: rust-build
 		NILDB_TEST_ENGINE=$$e $(GO) test -tags nilengine -count=$(BENCH_COUNT) -run '^$$' -bench '^BenchmarkServer$$' \
 			-benchtime $(BENCH_OPS) -timeout 60m $(NILENGINE_LDFLAGS) ./cmd/nildb || exit 1; \
 	done
+
+# Web console (cmd/nildb-ui). It talks RESP3 to a running server, so it
+# works with any engine; run-ui serves it on http://127.0.0.1:8090 for the
+# server make run starts.
+.PHONY: ui run-ui
+
+ui:
+	$(GO) build -o bin/nildb-ui ./cmd/nildb-ui
+
+run-ui: ui
+	./bin/nildb-ui --nildb 127.0.0.1:6380 --addr 127.0.0.1:8090
