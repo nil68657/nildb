@@ -24,7 +24,10 @@ type Reader interface {
 }
 
 // IterOpts tunes one iterator. The zero value is the analytical profile
-// (no block-cache fill); OLTP callers set FillCache.
+// (no block-cache fill); OLTP callers set FillCache. The Rust engines
+// iterate in total order with the bounds alone, so TotalOrderSeek,
+// Readahead, AsyncIO and LowPriority change nothing there; Deadline is
+// checked in Go and PrefixSameAsStart becomes a key-prefix check.
 type IterOpts struct {
 	FillCache         bool          // false on every analytical iterator
 	TotalOrderSeek    bool          // required whenever [lo, hi) may cross a prefix on a CF with an extractor
@@ -45,7 +48,7 @@ func (s *Store) Get(cf CF, key []byte) ([]byte, bool, error) {
 	if s.closed.Load() {
 		return nil, false, ErrClosed
 	}
-	return getCopy(s.db, s.ro, s.handle(cf), key)
+	return s.kv.get(nil, cf, key)
 }
 
 // GetPinned implements Reader on live committed state.
@@ -53,8 +56,8 @@ func (s *Store) GetPinned(cf CF, key []byte, fn func(val []byte) error) (bool, e
 	if s.closed.Load() {
 		return false, ErrClosed
 	}
-	h, err := s.db.GetPinnedCF(s.ro, s.handle(cf), key)
-	return callPinned(h, err, fn)
+	p, err := s.kv.getPinned(nil, cf, key)
+	return callPinned(p, err, fn)
 }
 
 // MultiGet implements Reader on live committed state through RocksDB's
@@ -63,15 +66,15 @@ func (s *Store) MultiGet(cf CF, keys [][]byte) ([][]byte, error) {
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
-	return multiGet(s.db, s.ro, s.handle(cf), keys)
+	return s.kv.multiGet(nil, cf, keys)
 }
 
 // Iter implements Reader on live committed state.
 func (s *Store) Iter(cf CF, lo, hi []byte, o IterOpts) Iterator {
 	if s.closed.Load() {
-		return &iterator{err: ErrClosed}
+		return &failedIter{err: ErrClosed}
 	}
-	return s.newIter(cf, lo, hi, o, nil, nil)
+	return s.kv.iter(nil, cf, lo, hi, o)
 }
 
 // At returns a Reader over the snapshot. After the snapshot is released
@@ -90,10 +93,10 @@ type snapReader struct {
 	h *snapHandle
 }
 
-// with runs fn under the snapshot's read lock with its read options, so a
-// concurrent Release waits until the C call that dereferences the
+// with runs fn under the snapshot's read lock with its engine snapshot, so
+// a concurrent Release waits until the C call that dereferences the
 // snapshot has returned.
-func (r *snapReader) with(fn func(ro *grocksdb.ReadOptions) error) error {
+func (r *snapReader) with(fn func(snap kvSnap) error) error {
 	r.h.mu.RLock()
 	defer r.h.mu.RUnlock()
 	if r.h.released {
@@ -102,35 +105,35 @@ func (r *snapReader) with(fn func(ro *grocksdb.ReadOptions) error) error {
 	if r.s.closed.Load() {
 		return ErrClosed
 	}
-	return fn(r.h.ro)
+	return fn(r.h.snap)
 }
 
 func (r *snapReader) Get(cf CF, key []byte) (val []byte, ok bool, err error) {
-	err = r.with(func(ro *grocksdb.ReadOptions) error {
+	err = r.with(func(snap kvSnap) error {
 		var e error
-		val, ok, e = getCopy(r.s.db, ro, r.s.handle(cf), key)
+		val, ok, e = r.s.kv.get(snap, cf, key)
 		return e
 	})
 	return val, ok, err
 }
 
 func (r *snapReader) GetPinned(cf CF, key []byte, fn func(val []byte) error) (bool, error) {
-	var h *grocksdb.PinnableSlice
+	var p pinned
 	var gerr error
-	if err := r.with(func(ro *grocksdb.ReadOptions) error {
-		h, gerr = r.s.db.GetPinnedCF(ro, r.s.handle(cf), key)
+	if err := r.with(func(snap kvSnap) error {
+		p, gerr = r.s.kv.getPinned(snap, cf, key)
 		return nil
 	}); err != nil {
 		return false, err
 	}
 	// The pinned value holds its own references; fn runs unlocked.
-	return callPinned(h, gerr, fn)
+	return callPinned(p, gerr, fn)
 }
 
 func (r *snapReader) MultiGet(cf CF, keys [][]byte) (vals [][]byte, err error) {
-	err = r.with(func(ro *grocksdb.ReadOptions) error {
+	err = r.with(func(snap kvSnap) error {
 		var e error
-		vals, e = multiGet(r.s.db, ro, r.s.handle(cf), keys)
+		vals, e = r.s.kv.multiGet(snap, cf, keys)
 		return e
 	})
 	return vals, err
@@ -138,9 +141,14 @@ func (r *snapReader) MultiGet(cf CF, keys [][]byte) (vals [][]byte, err error) {
 
 func (r *snapReader) Iter(cf CF, lo, hi []byte, o IterOpts) Iterator {
 	if r.s.closed.Load() {
-		return &iterator{err: ErrClosed}
+		return &failedIter{err: ErrClosed}
 	}
-	return r.s.newIter(cf, lo, hi, o, r.h, nil)
+	r.h.mu.RLock()
+	defer r.h.mu.RUnlock()
+	if r.h.released {
+		return &failedIter{err: ErrLeaseExpired}
+	}
+	return r.s.kv.iter(r.h.snap, cf, lo, hi, o)
 }
 
 // getCopy reads one value through a pinnable slice and copies it into Go
@@ -158,15 +166,15 @@ func getCopy(db *grocksdb.DB, ro *grocksdb.ReadOptions, cf *grocksdb.ColumnFamil
 }
 
 // callPinned hands a pinned value to fn and destroys it.
-func callPinned(h *grocksdb.PinnableSlice, err error, fn func([]byte) error) (bool, error) {
+func callPinned(p pinned, err error, fn func([]byte) error) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer h.Destroy()
-	if !h.Exists() {
+	defer p.Destroy()
+	if !p.Exists() {
 		return false, nil
 	}
-	return true, fn(h.Data())
+	return true, fn(p.Data())
 }
 
 func multiGet(db *grocksdb.DB, ro *grocksdb.ReadOptions, cf *grocksdb.ColumnFamilyHandle, keys [][]byte) ([][]byte, error) {

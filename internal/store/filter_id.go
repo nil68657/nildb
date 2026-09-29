@@ -9,9 +9,9 @@ import (
 // (coll_id on doc, idx_id elsewhere) the published LiveSet reports as not
 // live. With no LiveSet published it keeps everything, as it does before
 // Open binds it. It never reads the database. One instance serves all four
-// CFs.
+// CFs; live points at the Store's published set.
 type idFilter struct {
-	live  atomic.Pointer[liveSetBox]
+	live  *atomic.Pointer[liveSetBox]
 	bound atomic.Bool
 }
 

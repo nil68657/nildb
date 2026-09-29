@@ -9,6 +9,7 @@ import (
 )
 
 func TestShimRoundTrip(t *testing.T) {
+	rocksOnly(t, "reads RocksDB's rate_limiter_priority through grocksdb read options")
 	active, why := ShimActive()
 	if !active {
 		t.Skipf("rate_limiter_priority shim is off: %v", why)

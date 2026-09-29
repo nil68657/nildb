@@ -9,7 +9,7 @@
 //	go test -tags nilengine ./internal/nilengine
 //
 // Without the tag this file is the whole package, so `go test ./...` and
-// `make test` never need a Rust toolchain. docs/design/rust-engines.md
-// describes the engines and the plan for putting them behind
-// internal/store.
+// `make test` never need a Rust toolchain. internal/store runs the server
+// on these engines under --engine lsm, btree or pgheap (kv_nil.go);
+// docs/design/rust-engines.md describes the engines and that seam.
 package nilengine

@@ -1,10 +1,13 @@
-// Package store is NilDB's storage engine and the only package that imports
-// grocksdb. It opens one RocksDB instance with eight column families and
-// the options of architecture.md section 2, and provides transactions over
-// WriteBatch and WriteBatchWI, live and snapshot readers, bounded
-// iterators, counted snapshot leases, the lock manager, the three
-// compaction filters, the nildb.i64add merge operator, range drops and the
-// admin calls behind ROCKS.*.
+// Package store is NilDB's storage layer and the only package that imports
+// grocksdb or internal/nilengine. It opens one engine with eight column
+// families: RocksDB with the options of architecture.md section 2, or,
+// built with -tags nilengine, one of the Rust engines (lsm, btree,
+// pgheap). On top of the engine it provides transactions over plain and
+// indexed write batches, live and snapshot readers, bounded iterators,
+// counted snapshot leases, the lock manager, the three compaction filters
+// on RocksDB and the sweeper that replaces them elsewhere, the
+// nildb.i64add merge operator, range drops and the admin calls behind
+// ROCKS.*.
 //
 // Lifetime rule: Close must run after every Reader call, Iterator and Txn
 // of the store has finished. Calls made after Close return ErrClosed, but a
@@ -15,11 +18,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/linxGnu/grocksdb"
 	"github.com/nil68657/nildb/internal/layout"
 )
 
@@ -61,6 +64,12 @@ func ParseCF(name string) (CF, bool) {
 	return 0, false
 }
 
+func checkCF(cf CF) {
+	if int(cf) >= NumCFs {
+		panic(fmt.Sprintf("store: unknown column family %d", cf))
+	}
+}
+
 // Type is the Redis type of a metadata entry.
 type Type = layout.Type
 
@@ -83,9 +92,16 @@ const (
 )
 
 // Config configures Open. Zero numeric fields take the defaults above, an
-// empty Fsync means FsyncEverySec and a nil Clock means time.Now.
+// empty Engine means EngineRocksDB, an empty Fsync means FsyncEverySec
+// and a nil Clock means time.Now.
+//
+// The Rust engines have one cache and one memtable budget: BlockCacheBytes
+// sizes the block cache, page cache or buffer pool, WriteBufferBytes the
+// LSM's memtable. AnalyticsCacheBytes, BgIOBytesPerSec and Statistics
+// apply to RocksDB only.
 type Config struct {
 	Dir                 string
+	Engine              string        // "rocksdb" | "lsm" | "btree" | "pgheap"
 	BlockCacheBytes     int64         // main HyperClockCache, default 512 MiB
 	AnalyticsCacheBytes int64         // col cache, default 64 MiB
 	WriteBufferBytes    int64         // WriteBufferManager cap, default 256 MiB
@@ -100,6 +116,12 @@ type Config struct {
 func (c Config) withDefaults() (Config, error) {
 	if c.Dir == "" {
 		return c, errors.New("store: Config.Dir is empty")
+	}
+	if c.Engine == "" {
+		c.Engine = EngineRocksDB
+	}
+	if err := checkEngine(c.Engine); err != nil {
+		return c, err
 	}
 	def := func(v *int64, d int64, name string) error {
 		switch {
@@ -168,17 +190,9 @@ var janitorInterval = time.Second
 type Store struct {
 	cfg      Config
 	readOnly bool
+	kv       kv
 
-	db   *grocksdb.DB
-	cfs  [NumCFs]*grocksdb.ColumnFamilyHandle
-	opts *dbOptions
-	ro   *grocksdb.ReadOptions         // shared by live point reads
-	wo   *grocksdb.WriteOptions        // commit options; sync under FsyncAlways
-	cro  *grocksdb.CompactRangeOptions // manual compactions, non-exclusive
-
-	metaF *metaFilter
-	subF  *subFilter
-	idF   *idFilter
+	live atomic.Pointer[liveSetBox] // the LiveSet idFilter and the sweeper read
 
 	vgen  *layout.VersionGen
 	vseed uint64 // version seed read at Open
@@ -186,6 +200,7 @@ type Store struct {
 	locks   lockManager
 	snaps   snapRegistry
 	compact compactor
+	sweep   sweeper
 
 	closeMu sync.Mutex
 	closed  atomic.Bool
@@ -195,12 +210,16 @@ type Store struct {
 
 // Open opens (creating if needed) the database in cfg.Dir with all eight
 // column families. A new database gets the layout marker; an existing one
-// must carry it, and Open refuses a non-empty database without it.
+// must carry it, and Open refuses a non-empty database without it. The
+// directory must belong to cfg.Engine (see engineFile).
 func Open(cfg Config) (*Store, error) { return open(cfg, false) }
 
 // OpenReadOnly opens an existing database, typically a checkpoint, without
-// write access. Writes fail with RocksDB's "not supported in read only
-// mode" error, no compaction runs, and Close persists nothing.
+// write access. Writes fail (RocksDB's "not supported in read only mode"
+// error, or "store: opened read-only"), no RocksDB compaction runs, and
+// Close persists nothing. The Rust engines open the directory with their
+// normal open, which may replay a log or write an end-of-recovery
+// checkpoint into it; the store refuses writes on top.
 func OpenReadOnly(cfg Config) (*Store, error) { return open(cfg, true) }
 
 func open(cfg Config, readOnly bool) (*Store, error) {
@@ -208,54 +227,38 @@ func open(cfg Config, readOnly bool) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := engineAvailable(cfg.Engine); err != nil {
+		return nil, err
+	}
+	if err := checkEngineMarker(cfg.Dir, cfg.Engine, readOnly); err != nil {
+		return nil, err
+	}
 	s := &Store{cfg: cfg, readOnly: readOnly, stop: make(chan struct{})}
-	clock := cfg.Clock
-	nowMS := func() int64 { return clock().UnixMilli() }
-	s.metaF = &metaFilter{now: nowMS}
-	s.subF = &subFilter{now: nowMS}
-	s.idF = &idFilter{}
-
-	o := newDBOptions(cfg, s.metaF, s.subF, s.idF)
-	var handles []*grocksdb.ColumnFamilyHandle
-	if readOnly {
-		s.db, handles, err = grocksdb.OpenDbForReadOnlyColumnFamilies(o.db, cfg.Dir, cfNames[:], o.cf, false)
-	} else {
-		s.db, handles, err = grocksdb.OpenDbColumnFamilies(o.db, cfg.Dir, cfNames[:], o.cf)
-	}
+	s.kv, err = openKV(cfg, readOnly, s)
 	if err != nil {
-		o.release()
-		return nil, fmt.Errorf("store: open %s: %w", cfg.Dir, err)
+		return nil, err
 	}
-	copy(s.cfs[:], handles)
-	s.opts = o
-	s.ro = grocksdb.NewDefaultReadOptions()
-	s.wo = grocksdb.NewDefaultWriteOptions()
-	s.wo.SetSync(cfg.Fsync == FsyncAlways)
-	s.cro = grocksdb.NewCompactRangeOptions()
-	s.cro.SetExclusiveManualCompaction(false)
-
 	if err := s.checkLayout(); err != nil {
-		s.shutdownDB()
+		_ = s.kv.close()
 		return nil, err
 	}
 	seed, err := s.loadVersionSeed()
 	if err != nil {
-		s.shutdownDB()
+		_ = s.kv.close()
 		return nil, err
 	}
 	s.vseed = seed
 	s.vgen = layout.NewVersionGen(seed)
 	s.snaps.init()
 	s.compact.init(s.runCompact)
-
-	if !readOnly {
-		s.metaF.bound.Store(true)
-		s.subF.bind(s.db, s.cfs[CFMeta])
-		s.idF.bound.Store(true)
-	}
+	s.kv.bind(s)
 
 	s.janitor.Add(1)
 	go s.runJanitor(janitorInterval)
+	if s.kv.sweeps() && !readOnly {
+		s.janitor.Add(1)
+		go s.runSweeper()
+	}
 	return s, nil
 }
 
@@ -287,13 +290,19 @@ func (s *Store) checkLayout() error {
 			return fmt.Errorf("store: %s holds data in %s but no layout marker %q; refusing to open", s.cfg.Dir, cf, layout.LayoutMarker)
 		}
 	}
-	wo := grocksdb.NewDefaultWriteOptions()
-	defer wo.Destroy()
-	wo.SetSync(true)
-	if err := s.db.PutCF(wo, s.cfs[CFDefault], layout.LayoutMarkerKey, []byte(layout.LayoutMarker)); err != nil {
+	if err := s.putSynced(CFDefault, layout.LayoutMarkerKey, []byte(layout.LayoutMarker)); err != nil {
 		return fmt.Errorf("store: write layout marker: %w", err)
 	}
 	return nil
+}
+
+// putSynced writes one key and syncs, whatever Config.Fsync says: the
+// store's own records (the layout marker, the version seed) must survive.
+func (s *Store) putSynced(cf CF, key, val []byte) error {
+	b := s.kv.newBatch()
+	defer b.destroy()
+	b.put(cf, key, val)
+	return s.kv.write(b, true)
 }
 
 // loadVersionSeed returns the highest collection version known to the
@@ -331,19 +340,16 @@ func (s *Store) saveVersion() error {
 	if last == s.vseed {
 		return nil
 	}
-	wo := grocksdb.NewDefaultWriteOptions()
-	defer wo.Destroy()
-	wo.SetSync(true)
 	val := binary.BigEndian.AppendUint64(nil, last)
-	if err := s.db.PutCF(wo, s.cfs[CFDefault], layout.SeqKey(layout.SeqVersion), val); err != nil {
+	if err := s.putSynced(CFDefault, layout.SeqKey(layout.SeqVersion), val); err != nil {
 		return fmt.Errorf("store: save version seed: %w", err)
 	}
 	return nil
 }
 
-// Close stops the janitor, cancels pending scheduled compactions, saves
-// the version generator, releases every snapshot and closes the database.
-// A second Close returns nil.
+// Close stops the janitor and the sweeper, cancels pending scheduled
+// compactions, saves the version generator, releases every snapshot and
+// closes the database. A second Close returns nil.
 func (s *Store) Close() error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
@@ -353,49 +359,17 @@ func (s *Store) Close() error {
 	s.closed.Store(true)
 	close(s.stop)
 	s.janitor.Wait()
-	if !s.readOnly {
-		s.db.DisableManualCompaction()
-	}
+	s.kv.stopBackground()
 	s.compact.close()
 	var err error
 	if !s.readOnly {
 		err = s.saveVersion()
 	}
 	s.releaseAll()
-	s.shutdownDB()
+	if cerr := s.kv.close(); err == nil {
+		err = cerr
+	}
 	return err
-}
-
-// shutdownDB unbinds the filters and closes RocksDB. It frees the option
-// objects NilDB owns; see dbOptions for the ones it leaks on purpose.
-func (s *Store) shutdownDB() {
-	s.metaF.bound.Store(false)
-	s.idF.bound.Store(false)
-	s.subF.unbind()
-	if !s.readOnly {
-		s.db.CancelAllBackgroundWork(true)
-	}
-	for i, h := range s.cfs {
-		if h != nil {
-			h.Destroy()
-			s.cfs[i] = nil
-		}
-	}
-	s.db.Close()
-	s.subF.destroy()
-	if s.ro != nil {
-		s.ro.Destroy()
-		s.ro = nil
-	}
-	if s.wo != nil {
-		s.wo.Destroy()
-		s.wo = nil
-	}
-	if s.cro != nil {
-		s.cro.Destroy()
-		s.cro = nil
-	}
-	s.opts.release()
 }
 
 // Clock returns the store's clock (Config.Clock or time.Now).
@@ -407,7 +381,7 @@ func (s *Store) Clock() func() time.Time { return s.cfg.Clock }
 func (s *Store) VersionGen() *layout.VersionGen { return s.vgen }
 
 // WriteOpts reports whether commits sync the WAL (Fsync "always").
-func (s *Store) WriteOpts() (sync bool) { return s.cfg.Fsync == FsyncAlways }
+func (s *Store) WriteOpts() (sync bool) { return s.syncCommits() }
 
 // Config returns the configuration Open used, defaults applied.
 func (s *Store) Config() Config { return s.cfg }
@@ -415,13 +389,33 @@ func (s *Store) Config() Config { return s.cfg }
 // ReadOnly reports whether the store was opened with OpenReadOnly.
 func (s *Store) ReadOnly() bool { return s.readOnly }
 
-// Handle returns the *grocksdb.ColumnFamilyHandle of cf. It exists for
-// tests inside this package; other packages must not use it.
-func (s *Store) Handle(cf CF) any { return s.handle(cf) }
+// Engine returns the name of the engine the store runs on: "rocksdb",
+// "lsm", "btree" or "pgheap".
+func (s *Store) Engine() string { return s.cfg.Engine }
 
-func (s *Store) handle(cf CF) *grocksdb.ColumnFamilyHandle {
-	if int(cf) >= NumCFs {
-		panic(fmt.Sprintf("store: unknown column family %d", cf))
+// EngineVersion returns the version of the engine library: RocksDB's
+// "11.8.1" from <rocksdb/version.h>, or nil_version() of the Rust engines.
+func (s *Store) EngineVersion() string { return s.kv.version() }
+
+// ShimActive reports whether IterOpts.LowPriority reaches a rate limiter,
+// and if not, why: the package-level ShimActive under RocksDB, and false
+// with "engine lsm has no rate limiter" (or btree, pgheap) otherwise.
+func (s *Store) ShimActive() (bool, error) { return s.kv.shimActive() }
+
+// Handle returns the engine's handle of cf: a *grocksdb.ColumnFamilyHandle
+// on RocksDB. It exists for tests inside this package; other packages must
+// not use it.
+func (s *Store) Handle(cf CF) any {
+	checkCF(cf)
+	return s.kv.handle(cf)
+}
+
+// TestEngine returns the engine the test suites of every package run on:
+// $NILDB_TEST_ENGINE, or rocksdb when it is unset. `make test-engines`
+// sets it once per engine.
+func TestEngine() string {
+	if e := os.Getenv("NILDB_TEST_ENGINE"); e != "" {
+		return e
 	}
-	return s.cfs[cf]
+	return EngineRocksDB
 }

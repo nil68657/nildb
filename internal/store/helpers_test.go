@@ -29,11 +29,13 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// testConfig is a small-footprint config in a fresh temp dir.
+// testConfig is a small-footprint config in a fresh temp dir, on the
+// engine TestEngine names.
 func testConfig(t testing.TB, clock func() time.Time) Config {
 	t.Helper()
 	return Config{
 		Dir:                 t.TempDir(),
+		Engine:              TestEngine(),
 		BlockCacheBytes:     8 << 20,
 		AnalyticsCacheBytes: 4 << 20,
 		WriteBufferBytes:    32 << 20,
@@ -42,11 +44,29 @@ func testConfig(t testing.TB, clock func() time.Time) Config {
 	}
 }
 
+// rocksOnly skips a test on the Rust engines; why names the RocksDB
+// feature it needs.
+func rocksOnly(t testing.TB, why string) {
+	t.Helper()
+	if e := TestEngine(); e != EngineRocksDB {
+		t.Skipf("RocksDB only (%s); this run uses engine %s", why, e)
+	}
+}
+
+// rustOnly skips a test on RocksDB; why names what only the Rust engines
+// have.
+func rustOnly(t testing.TB, why string) {
+	t.Helper()
+	if TestEngine() == EngineRocksDB {
+		t.Skipf("Rust engines only (%s)", why)
+	}
+}
+
 // openTest opens a store in a temp dir and closes it at cleanup.
 func openTest(t testing.TB, mut func(*Config)) *Store {
 	t.Helper()
 	if testing.Short() {
-		t.Skip("opens RocksDB")
+		t.Skip("opens the engine")
 	}
 	cfg := testConfig(t, nil)
 	if mut != nil {

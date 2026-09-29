@@ -2,6 +2,8 @@ package store
 
 import (
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -47,28 +49,88 @@ func TestEightColumnFamilies(t *testing.T) {
 	if got := s.CFNames(); !slices.Equal(got, want) {
 		t.Fatalf("CFNames = %v, want %v", got, want)
 	}
-	opts := grocksdb.NewDefaultOptions()
-	got, err := grocksdb.ListColumnFamilies(opts, s.Config().Dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	slices.Sort(got)
-	sorted := slices.Clone(want)
-	slices.Sort(sorted)
-	if !slices.Equal(got, sorted) {
-		t.Fatalf("ListColumnFamilies = %v, want %v", got, sorted)
-	}
 	for i, name := range want {
 		cf, ok := ParseCF(name)
 		if !ok || cf != CF(i) || cf.String() != name {
 			t.Errorf("ParseCF(%q) = %v, %v", name, cf, ok)
 		}
-		if h := s.Handle(cf).(*grocksdb.ColumnFamilyHandle); h.Name() != name {
-			t.Errorf("Handle(%s).Name() = %q", cf, h.Name())
-		}
+		txn := s.Begin()
+		txn.Put(cf, []byte("k"), []byte(name))
+		commit(t, txn)
+	}
+	for i, name := range want {
+		wantValue(t, s, CF(i), []byte("k"), []byte(name))
 	}
 	if _, ok := ParseCF("nope"); ok {
 		t.Error("ParseCF(nope) succeeded")
+	}
+	t.Run("rocksdb families", func(t *testing.T) {
+		rocksOnly(t, "lists the column families with grocksdb")
+		got, err := grocksdb.ListColumnFamilies(grocksdb.NewDefaultOptions(), s.Config().Dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(got)
+		sorted := slices.Clone(want)
+		slices.Sort(sorted)
+		if !slices.Equal(got, sorted) {
+			t.Fatalf("ListColumnFamilies = %v, want %v", got, sorted)
+		}
+		for i, name := range want {
+			if h := s.Handle(CF(i)).(*grocksdb.ColumnFamilyHandle); h.Name() != name {
+				t.Errorf("Handle(%s).Name() = %q", CF(i), h.Name())
+			}
+		}
+	})
+}
+
+func TestEngineMarker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("opens the engine")
+	}
+	engine := TestEngine()
+	cfg := testConfig(t, nil)
+	s, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Engine() != engine || s.EngineVersion() == "" {
+		t.Fatalf("Engine() = %q, EngineVersion() = %q", s.Engine(), s.EngineVersion())
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(cfg.Dir, "ENGINE")); err != nil || string(b) != engine+"\n" {
+		t.Fatalf("ENGINE file = %q, %v; want %q", b, err, engine+"\n")
+	}
+
+	// A directory another engine's marker names opens with that one only.
+	other := EngineLSM
+	if engine == EngineLSM {
+		other = EngineBTree
+	}
+	foreign := testConfig(t, nil)
+	if err := os.WriteFile(filepath.Join(foreign.Dir, "ENGINE"), []byte(other+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, open := range []func(Config) (*Store, error){Open, OpenReadOnly} {
+		if _, err := open(foreign); err == nil || !strings.Contains(err.Error(), "open it with --engine "+other) {
+			t.Fatalf("open of a %s directory with engine %s: %v", other, engine, err)
+		}
+	}
+	// A directory with files and no marker is a RocksDB directory from
+	// before the marker existed.
+	if engine != EngineRocksDB {
+		legacy := testConfig(t, nil)
+		if err := os.WriteFile(filepath.Join(legacy.Dir, "CURRENT"), []byte("MANIFEST-000005\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(legacy); err == nil || !strings.Contains(err.Error(), "open it with --engine rocksdb") {
+			t.Fatalf("open of an unmarked directory with %s: %v", engine, err)
+		}
+	}
+	if _, err := Open(Config{Dir: t.TempDir(), Engine: "leveldb"}); err == nil || !strings.Contains(err.Error(), "want rocksdb, lsm, btree or pgheap") {
+		t.Fatalf("Open with an unknown engine: %v", err)
 	}
 }
 
@@ -91,6 +153,7 @@ func TestLayoutMarkerChecks(t *testing.T) {
 		}
 	})
 	t.Run("foreign data", func(t *testing.T) {
+		rocksOnly(t, "writes the foreign database with grocksdb")
 		cfg := testConfig(t, nil)
 		opts := grocksdb.NewDefaultOptions()
 		opts.SetCreateIfMissing(true)

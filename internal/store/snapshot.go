@@ -4,11 +4,9 @@ import (
 	"slices"
 	"sync"
 	"time"
-
-	"github.com/linxGnu/grocksdb"
 )
 
-// Snapshot is a RocksDB snapshot NilDB tracks. Snapshot() creates a
+// Snapshot is an engine snapshot NilDB tracks. Snapshot() creates a
 // command-scoped one (uncounted, Expires zero); Lease() creates a counted
 // one that the janitor releases after its TTL. The exported fields are a
 // record of creation: the store decides expiry from its own copy, so
@@ -27,8 +25,7 @@ type Snapshot struct {
 // across the C call that dereferences snap; Release takes mu.Lock.
 type snapHandle struct {
 	mu       sync.RWMutex
-	snap     *grocksdb.Snapshot
-	ro       *grocksdb.ReadOptions // point reads under this snapshot
+	snap     kvSnap
 	lease    bool
 	expires  time.Time // leases only
 	released bool
@@ -43,17 +40,18 @@ type snapRegistry struct {
 
 func (r *snapRegistry) init() { r.all = make(map[uint64]*Snapshot) }
 
-// newSnapshot creates a RocksDB snapshot and registers it.
-func (s *Store) newSnapshot(owner string, lease bool, ttl time.Duration) *Snapshot {
-	snap := s.db.NewSnapshot()
-	ro := grocksdb.NewDefaultReadOptions()
-	ro.SetSnapshot(snap)
+// newSnapshot creates an engine snapshot and registers it.
+func (s *Store) newSnapshot(owner string, lease bool, ttl time.Duration) (*Snapshot, error) {
+	snap, seq, err := s.kv.snapshot()
+	if err != nil {
+		return nil, err
+	}
 	now := s.cfg.Clock()
 	sn := &Snapshot{
-		Seq:     snap.GetSequenceNumber(),
+		Seq:     seq,
 		Owner:   owner,
 		Created: now,
-		h:       &snapHandle{snap: snap, ro: ro, lease: lease},
+		h:       &snapHandle{snap: snap, lease: lease},
 	}
 	if lease {
 		sn.Expires = now.Add(ttl)
@@ -64,7 +62,7 @@ func (s *Store) newSnapshot(owner string, lease bool, ttl time.Duration) *Snapsh
 	sn.ID = s.snaps.nextID
 	s.snaps.all[sn.ID] = sn
 	s.snaps.mu.Unlock()
-	return sn
+	return sn, nil
 }
 
 // Snapshot takes a command-scoped snapshot. It is not counted against
@@ -74,7 +72,11 @@ func (s *Store) Snapshot() *Snapshot {
 	if s.closed.Load() {
 		return nil
 	}
-	return s.newSnapshot("", false, 0)
+	sn, err := s.newSnapshot("", false, 0)
+	if err != nil {
+		return nil
+	}
+	return sn
 }
 
 // Lease takes a snapshot counted against MaxSnapshots that the janitor
@@ -95,7 +97,14 @@ func (s *Store) Lease(owner string, ttl time.Duration) (*Snapshot, error) {
 			return nil, ErrTooManySnapshots
 		}
 	}
-	return s.newSnapshot(owner, true, ttl), nil
+	sn, err := s.newSnapshot(owner, true, ttl)
+	if err != nil {
+		s.snaps.mu.Lock()
+		s.snaps.leases--
+		s.snaps.mu.Unlock()
+		return nil, err
+	}
+	return sn, nil
 }
 
 // reserveLease takes a lease slot if one is free.
@@ -146,7 +155,7 @@ func (s *Store) Release(snap *Snapshot) {
 	}
 }
 
-// freeSnapshot waits for in-flight reads, then frees the C snapshot.
+// freeSnapshot waits for in-flight reads, then frees the engine snapshot.
 func (s *Store) freeSnapshot(h *snapHandle) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -154,10 +163,26 @@ func (s *Store) freeSnapshot(h *snapHandle) {
 		return
 	}
 	h.released = true
-	s.db.ReleaseSnapshot(h.snap)
+	s.kv.release(h.snap)
 	h.snap = nil
-	h.ro.Destroy()
-	h.ro = nil
+}
+
+// oldestSnapshotTime is the creation time, in Unix seconds, of the oldest
+// snapshot the store has not released, or 0: rocksdb.oldest-snapshot-time
+// for engines that do not report it.
+func (s *Store) oldestSnapshotTime() uint64 {
+	s.snaps.mu.Lock()
+	defer s.snaps.mu.Unlock()
+	var oldest time.Time
+	for _, sn := range s.snaps.all {
+		if oldest.IsZero() || sn.Created.Before(oldest) {
+			oldest = sn.Created
+		}
+	}
+	if oldest.IsZero() {
+		return 0
+	}
+	return uint64(oldest.Unix())
 }
 
 // Leases returns the unreleased leases ordered by ID.

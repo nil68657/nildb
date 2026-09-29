@@ -3,8 +3,6 @@ package store
 import (
 	"sync"
 	"time"
-
-	"github.com/linxGnu/grocksdb"
 )
 
 // RangeDelete is one [Lo, Hi) range tombstone for DeleteRanges. Hi must be
@@ -21,11 +19,12 @@ type PointDelete = struct {
 	Key []byte
 }
 
-// DeleteRanges drops keyspaces: one plain WriteBatch holding a
-// DeleteRangeCF per range plus the caller's point deletes (catalog
-// records, version-map entries), committed once, so the drop is atomic.
-// It never runs inside an indexed Txn. Follow it with ScheduleCompact on
-// each range so the range tombstones get compacted away.
+// DeleteRanges drops keyspaces: one plain write batch holding a range
+// delete per range plus the caller's point deletes (catalog records,
+// version-map entries), committed once, so the drop is atomic. It never
+// runs inside an indexed Txn. Follow it with ScheduleCompact on each range
+// so the range tombstones get compacted away (on pgheap, so VACUUM removes
+// the rows the range delete marked dead).
 func (s *Store) DeleteRanges(ranges []RangeDelete, alsoDelete []struct {
 	CF  CF
 	Key []byte
@@ -33,27 +32,28 @@ func (s *Store) DeleteRanges(ranges []RangeDelete, alsoDelete []struct {
 	if s.closed.Load() {
 		return ErrClosed
 	}
-	wb := grocksdb.NewWriteBatch()
-	defer wb.Destroy()
-	n := 0
 	for _, r := range ranges {
-		skip, err := rangeErr(r.CF, r.Lo, r.Hi)
-		if err != nil {
+		if _, err := rangeErr(r.CF, r.Lo, r.Hi); err != nil {
 			return err
 		}
-		if !skip {
-			wb.DeleteRangeCF(s.handle(r.CF), r.Lo, r.Hi)
+	}
+	b := s.kv.newBatch()
+	defer b.destroy()
+	n := 0
+	for _, r := range ranges {
+		if skip, _ := rangeErr(r.CF, r.Lo, r.Hi); !skip {
+			b.deleteRange(r.CF, r.Lo, r.Hi)
 			n++
 		}
 	}
 	for _, p := range alsoDelete {
-		wb.DeleteCF(s.handle(p.CF), p.Key)
+		b.delete(p.CF, p.Key)
 		n++
 	}
 	if n == 0 {
 		return nil
 	}
-	return s.db.Write(s.wo, wb)
+	return s.kv.write(b, s.syncCommits())
 }
 
 // Scheduling of post-drop compactions. Tests in this package change the
@@ -74,7 +74,7 @@ func (s *Store) ScheduleCompact(cf CF, lo, hi []byte) {
 	if s.closed.Load() {
 		return
 	}
-	s.handle(cf) // reject an unknown CF now, not in the timer
+	checkCF(cf) // reject an unknown CF now, not in the timer
 	s.compact.schedule(cf, clonePtr(lo), clonePtr(hi))
 }
 
@@ -90,7 +90,7 @@ func (s *Store) runCompact(cf CF, lo, hi []byte) {
 	if s.closed.Load() {
 		return
 	}
-	s.db.CompactRangeCFOpt(s.cfs[cf], grocksdb.Range{Start: lo, Limit: hi}, s.cro)
+	_ = s.kv.compact(cf, lo, hi)
 	if compactHook != nil {
 		compactHook(cf, lo, hi)
 	}
