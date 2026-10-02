@@ -407,8 +407,9 @@ export function reprBulk(v) {
 export function quoteArg(a) {
   const s = typeof a === 'string' ? a : a && a.b64 ? escapeBytes(b64Bytes(a.b64)) : String(a);
   if (s !== '' && /^[^\s"'\\]+$/.test(s) && !/[\x00-\x1f\x7f]/.test(s)) return s;
-  // Single quotes keep JSON readable; inside them only \' is an escape.
-  if (s.includes('"') && !s.includes("'") && !/[\x00-\x1f\x7f]/.test(s)) return `'${s}'`;
+  // Single quotes keep JSON readable; inside them only \' is an escape, so a
+  // trailing backslash would escape the closing quote.
+  if (s.includes('"') && !s.includes("'") && !s.endsWith('\\') && !/[\x00-\x1f\x7f]/.test(s)) return `'${s}'`;
   return '"' + escapeText(s) + '"';
 }
 

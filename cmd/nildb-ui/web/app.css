@@ -745,6 +745,7 @@ dialog.palette[open] { animation: pop-in 120ms var(--ease); }
   .palette-btn { width: 40px; padding: 0; justify-content: center; }
   .palette-btn-text, .palette-btn kbd { display: none; }
   .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(220px, 40%) minmax(0, 1fr); }
+  .split.docs { grid-template-columns: minmax(0, 1fr); }
   .pane + .pane { border-left: 0; border-top: 1px solid var(--line); }
   .geo-side { width: 300px; }
 }
