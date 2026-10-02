@@ -5,7 +5,7 @@
 
 import {
   h, clear, api, text, num, items, field, isErr, toJS, fmtInt, fmtNum, fmtDuration, fmtMs, iconButton, button,
-  ejsonKind, ejsonLabel, ejsonNumber, parseJSONArg, ReplyError,
+  ejsonKind, ejsonLabel, ejsonNumber, parseJSONArg, plural, ReplyError,
 } from '../lib.js';
 import {
   toast, toastError, confirmDialog, formDialog, seg, spinner, emptyState, jsonTree, planView, table, barChart,
@@ -34,9 +34,13 @@ function sampleFields(doc) {
   return { str, num: numf };
 }
 
+// groupish are field names that usually hold few distinct values.
+const groupish = /^(city|country|region|state|status|type|kind|category|plan|group|tier|level)$/i;
+const measureish = /^(total|amount|price|rating|score|value|count|qty|quantity|items|seats|revenue)$/i;
+
 function templates(f) {
-  const g = f.str[0] || 'city';
-  const n = f.num[0] || 'price';
+  const g = f.str.find((k) => groupish.test(k)) || f.str.find((k) => !/slug|name|email|id$/i.test(k)) || f.str[0] || 'city';
+  const n = f.num.find((k) => measureish.test(k)) || f.num[0] || 'price';
   const lab = f.str.find((x) => x !== g) || g;
   return [
     [`Count by ${g}`, [{ $group: { _id: `$${g}`, n: { $sum: 1 } } }, { $sort: { n: -1 } }, { $limit: 20 }]],
@@ -47,6 +51,12 @@ function templates(f) {
 }
 
 const pretty = (pipeline) => '[\n' + pipeline.map((s) => '  ' + JSON.stringify(s)).join(',\n') + '\n]';
+
+// sortField returns the first field of the pipeline's last $sort stage.
+function sortField(pipelineText) {
+  const sorts = JSON.parse(pipelineText).filter((s) => s && typeof s.$sort === 'object' && s.$sort !== null);
+  return sorts.length ? Object.keys(sorts[sorts.length - 1].$sort)[0] || '' : '';
+}
 
 export function create(app) {
   const collSel = h('select', { class: 'select', 'aria-label': 'Collection' });
@@ -97,9 +107,10 @@ export function create(app) {
 
   const el = h('section', { class: 'view view-scroll', 'aria-label': 'Analytics' },
     h('div', { class: 'view-head' }, h('h1', null, 'Analytics'), h('span', { class: 'sub' }, 'NIL.AGGREGATE, NIL.COUNT and NIL.DISTINCT on snapshot leases')),
-    h('div', { class: 'view-body' },
-      h('div', { class: 'grid cols-2' }, cQuery.el, h('div', { class: 'grid' }, cLeases.el, cKeys.el)),
-      cResult.el));
+    h('div', { class: 'view-body an-grid' },
+      cQuery.el, cResult.el, h('div', { class: 'grid an-side' }, cLeases.el, cKeys.el)));
+  cQuery.el.classList.add('an-query');
+  cResult.el.classList.add('an-result');
 
   let leases = [];
   let clockOffset = 0;
@@ -247,6 +258,7 @@ export function create(app) {
     runBtn.disabled = true;
     explainBtn.disabled = true;
     const t0 = performance.now();
+    let sortedBy = '';
     try {
       if (mode === 'aggregate') {
         const pipeline = parseJSONArg(pipeIn.value, 'The pipeline', { array: true });
@@ -268,8 +280,9 @@ export function create(app) {
         const left = cursorId(c);
         if (left !== '0') await api.run(['DOC.CURSOR', 'DEL', left], { db: 0 });
         rows = out;
+        sortedBy = sortField(pipeline);
         if (resultMode === 'plan') resultMode = 'chart';
-        resultInfo.textContent = `${fmtInt(rows.length)} rows${left !== '0' ? ` (the first ${fmtInt(ROW_CAP)})` : ''} · ${reads} ${reads === 1 ? 'batch' : 'batches'} · ${fmtMs(performance.now() - t0)} · ${leaseNote()}`;
+        resultInfo.textContent = `${plural(rows.length, 'row')}${left !== '0' ? ` (the first ${fmtInt(ROW_CAP)})` : ''} · ${plural(reads, 'batch', 'batches')} · ${fmtMs(performance.now() - t0)} · ${leaseNote()}`;
       } else if (mode === 'count') {
         const filter = parseJSONArg(filterIn.value, 'The filter');
         const n = num(await api.ok(commonOpts(['NIL.COUNT', ns, filter]), { db: 0 }));
@@ -283,10 +296,10 @@ export function create(app) {
         const vals = items(await api.ok(commonOpts(['NIL.DISTINCT', ns, f, filter]), { db: 0 })).map((v) => JSON.parse(text(v)));
         rows = vals.map((v) => ({ [f]: v }));
         if (resultMode === 'chart' || resultMode === 'plan') resultMode = 'table';
-        resultInfo.textContent = `NIL.DISTINCT ${fmtInt(vals.length)} values of ${f} · ${fmtMs(performance.now() - t0)} · ${leaseNote()}`;
+        resultInfo.textContent = `NIL.DISTINCT ${plural(vals.length, 'value')} of ${f} · ${fmtMs(performance.now() - t0)} · ${leaseNote()}`;
       }
       resultSeg.set(resultMode);
-      pickAxes();
+      pickAxes(sortedBy);
       paintResult();
       loadLeases();
     } catch (e) {
@@ -298,12 +311,14 @@ export function create(app) {
   }
 
   // pickAxes chooses the chart's label field (_id or the first text field)
-  // and value field (the first numeric field).
-  function pickAxes() {
+  // and value field: the sort field when it is numeric, so the bars follow
+  // the row order, else the previous choice, else the first numeric field.
+  function pickAxes(sortedBy) {
     const keys = [...new Set(rows.slice(0, 50).flatMap((r) => Object.keys(r)))];
     const numeric = keys.filter((k) => rows.some((r) => Number.isFinite(ejsonNumber(r[k]))));
     if (!keys.includes(labelKey)) labelKey = keys.includes('_id') ? '_id' : keys.find((k) => !numeric.includes(k)) || keys[0] || '';
-    if (!numeric.includes(valueKey) || valueKey === labelKey) valueKey = numeric.find((k) => k !== labelKey) || '';
+    if (numeric.includes(sortedBy) && sortedBy !== labelKey) valueKey = sortedBy;
+    else if (!numeric.includes(valueKey) || valueKey === labelKey) valueKey = numeric.find((k) => k !== labelKey) || '';
   }
 
   function paintResult() {
@@ -352,7 +367,7 @@ export function create(app) {
       const s = toJS(await api.ok(args, { db: 0 }));
       const types = ['string', 'hash', 'list', 'set', 'zset'];
       clear(cKeys.body,
-        h('p', { class: 'faint' }, `db ${s.db}: ${fmtInt(s.keys)} keys, ${fmtInt(s.expires)} with a TTL · ${fmtMs(performance.now() - t0)}`),
+        h('p', { class: 'faint' }, `db ${s.db}: ${plural(s.keys, 'key')}, ${fmtInt(s.expires)} with a TTL · ${fmtMs(performance.now() - t0)}`),
         barChart(types.map((t) => ({ label: t, value: Number(s[t] || 0) })), { label: 'Keys by type', format: fmtInt }));
     } catch (e) {
       clear(cKeys.body, h('span', { class: 'r-err' }, e.message));

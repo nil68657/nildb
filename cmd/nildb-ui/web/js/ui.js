@@ -2,7 +2,7 @@
 // list, the JSON tree, charts and the EXPLAIN plan.
 
 import {
-  h, append, clear, icon, svgEl, uid, fmtInt, fmtNum, ejsonKind, ejsonLabel, ApiError,
+  h, append, clear, icon, svgEl, uid, fmtInt, fmtNum, plural, ejsonKind, ejsonLabel, ApiError,
 } from './lib.js';
 
 /* ---------------- toasts ---------------- */
@@ -172,7 +172,7 @@ export function kv(pairs) {
   const dl = h('dl', { class: 'kv' });
   for (const [k, v] of pairs) {
     if (v === undefined) continue;
-    dl.append(h('dt', null, k), h('dd', null, v == null || v === '' ? '—' : v));
+    dl.append(h('dt', null, k), h('dd', null, v == null || v === '' ? '–' : v));
   }
   return dl;
 }
@@ -359,7 +359,7 @@ function jnode(key, v, depth) {
   }
   const list = kind === 'array' ? v.map((x, i) => [i, x]) : Object.entries(v);
   const [open, close] = kind === 'array' ? ['[', ']'] : ['{', '}'];
-  const count = kind === 'array' ? `${fmtInt(list.length)} items` : `${fmtInt(list.length)} fields`;
+  const count = kind === 'array' ? plural(list.length, 'item') : plural(list.length, 'field');
   if (!list.length) return h('div', { class: 'jline' }, keyEl(key), h('span', { class: 'jsum' }, open + close));
   const wrap = h('div');
   const kids = h('div', { class: 'jnode' });
@@ -431,7 +431,7 @@ export function barChart(rows, { format = fmtNum, label = 'Bar chart' } = {}) {
     el.append(h('div', { class: 'bars-row', role: 'listitem' },
       h('span', { class: 'lbl', title: r.label }, r.label),
       h('span', { class: 'track' }, fill),
-      h('span', { class: 'val' }, Number.isFinite(r.value) ? format(r.value) : '—')));
+      h('span', { class: 'val' }, Number.isFinite(r.value) ? format(r.value) : '–')));
   }
   return el;
 }
@@ -446,7 +446,7 @@ export function planView(p) {
     h('span', { class: 'k' }, 'source'),
     h('span', { class: 'v' }, p.plan === 'index' ? `index ${p.index ?? ''}` : String(p.plan)),
     (p.bounds || []).map((b) => h('span', { class: 'd' }, b)),
-    h('span', { class: 'd' }, `≈ ${fmtInt(p.estimatedRows)} rows read`));
+    h('span', { class: 'd' }, `≈ ${fmtInt(p.estimatedRows)} ${Number(p.estimatedRows) === 1 ? 'row' : 'rows'} read`));
   const el = h('div', { class: 'plan', role: 'list', 'aria-label': 'Query plan' }, src);
   for (const s of p.stages || []) {
     el.append(arrow(), h('div', { class: 'plan-step', role: 'listitem' }, h('span', { class: 'k' }, 'stage'), h('span', { class: 'v' }, s)));
@@ -459,8 +459,8 @@ export function planView(p) {
 
 // table builds a simple table. cols: [{label, num, mono, cls}]; rows are
 // arrays of cells (strings or nodes).
-export function table(cols, rows, { empty = 'Nothing here yet', onRow, rowClass } = {}) {
-  const t = h('table', { class: `table${onRow ? ' clickable' : ''}` },
+export function table(cols, rows, { empty = 'Nothing here yet', onRow, rowClass, fixed } = {}) {
+  const t = h('table', { class: `table${onRow ? ' clickable' : ''}${fixed ? ' fixed' : ''}` },
     h('thead', null, h('tr', null, cols.map((c) => h('th', { class: c.num ? 'num' : c.cls || '', scope: 'col' }, c.label)))));
   const body = h('tbody');
   if (!rows.length) {

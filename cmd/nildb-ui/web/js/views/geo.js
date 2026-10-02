@@ -13,6 +13,9 @@ import { LAND } from '../world.js';
 const R_2DSPHERE = 6378100;
 const R_REDIS = 6372797.560856;
 const PLOT_MAX = 5000;
+// MIN_VIEW is the narrowest map view in degrees of longitude, about 10 km:
+// enough to tell the points of one neighbourhood apart.
+const MIN_VIEW = 360 / 4096;
 const rad = (d) => (d * Math.PI) / 180;
 const deg = (r) => (r * 180) / Math.PI;
 
@@ -36,13 +39,13 @@ function circlePath(lon, lat, metres, R) {
     const y = 90 - deg(lat2);
     const jump = prevX !== null && Math.abs(x - prevX) > 180;
     if (jump) broken = true;
-    out.push(`${prevX === null || jump ? 'M' : 'L'}${x.toFixed(2)} ${y.toFixed(2)}`);
+    out.push(`${prevX === null || jump ? 'M' : 'L'}${x.toFixed(5)} ${y.toFixed(5)}`);
     prevX = x;
   }
   return out.join('') + (broken ? '' : 'Z');
 }
 
-const dots = (pts) => pts.map((p) => `M${(p.lon + 180).toFixed(3)} ${(90 - p.lat).toFixed(3)}h0`).join('');
+const dots = (pts) => pts.map((p) => `M${(p.lon + 180).toFixed(5)} ${(90 - p.lat).toFixed(5)}h0`).join('');
 const fmtKm = (m) => (m < 1000 ? `${Math.round(m)} m` : `${fmtNum(m / 1000, m < 10000 ? 2 : 1)} km`);
 const fmtCoord = (p) => `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`;
 
@@ -82,7 +85,11 @@ class WorldMap {
     this.svg.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       drag = { x: e.clientX, y: e.clientY, view: { ...this.view }, moved: false };
-      this.svg.setPointerCapture(e.pointerId);
+      try {
+        this.svg.setPointerCapture(e.pointerId);
+      } catch {
+        // A pointer that is not active cannot be captured; the drag still works inside the map.
+      }
     });
     this.svg.addEventListener('pointermove', (e) => {
       const p = this.toMap(e.clientX, e.clientY);
@@ -146,7 +153,7 @@ class WorldMap {
     const cw = this.svg.clientWidth || 800;
     const ch = this.svg.clientHeight || 400;
     const v = this.view;
-    v.w = Math.min(Math.max(v.w, 360 / 256), 720);
+    v.w = Math.min(Math.max(v.w, MIN_VIEW), 720);
     v.h = (v.w * ch) / cw;
     const cx = Math.min(Math.max(v.x + v.w / 2, 0), 360);
     const cy = Math.min(Math.max(v.y + v.h / 2, 0), 180);
@@ -158,7 +165,7 @@ class WorldMap {
   zoomAt(clientX, clientY, f) {
     const p = this.toMap(clientX, clientY);
     const v = this.view;
-    const nw = Math.min(Math.max(v.w * f, 360 / 256), 720);
+    const nw = Math.min(Math.max(v.w * f, MIN_VIEW), 720);
     const k = nw / v.w;
     v.x = p.x - (p.x - v.x) * k;
     v.y = p.y - (p.y - v.y) * k;
@@ -174,7 +181,7 @@ class WorldMap {
   box(x0, y0, x1, y1) {
     const cw = this.svg.clientWidth || 800;
     const ch = this.svg.clientHeight || 400;
-    const w = Math.max(x1 - x0, ((y1 - y0) * cw) / ch, 360 / 256);
+    const w = Math.max(x1 - x0, ((y1 - y0) * cw) / ch, MIN_VIEW);
     this.view = { x: (x0 + x1) / 2 - w / 2, y: (y0 + y1) / 2 - (w * ch) / cw / 2, w, h: 0 };
     this.apply();
   }
@@ -411,8 +418,8 @@ export function create(app) {
   }
 
   async function search(lon, lat) {
-    lon = ((lon + 540) % 360) - 180;
-    lat = Math.max(-85.05112878, Math.min(85.05112878, lat));
+    lon = Number((((lon + 540) % 360) - 180).toFixed(6));
+    lat = Number(Math.max(-85.05112878, Math.min(85.05112878, lat)).toFixed(6));
     const km = Number(radiusIn.value);
     const limit = Math.max(1, Math.floor(Number(limitIn.value) || 100));
     if (!(km > 0)) {

@@ -3,7 +3,7 @@
 
 import {
   h, clear, icon, api, text, items, parseInfo, parseKV, fmtInt, fmtMs, debounce,
-  keyName, store, badge,
+  keyName, store, badge, plural,
 } from './lib.js';
 import { toast, infoDialog, errorText } from './ui.js';
 
@@ -173,7 +173,15 @@ async function pulse() {
   try {
     const info = parseInfo(text(await api.run(['INFO', 'stats'], { db: 0 })));
     const st = info.stats || {};
-    app.pulse.push({ t: Date.now(), ops: Number(st.instantaneous_ops_per_sec) || 0, cmds: Number(st.total_commands_processed) || 0 });
+    const now = Date.now();
+    const cmds = Number(st.total_commands_processed) || 0;
+    const prev = app.pulse[app.pulse.length - 1];
+    // The rate between two pulses covers the whole interval;
+    // instantaneous_ops_per_sec covers only its last 1.6 seconds.
+    const ops = prev && cmds >= prev.cmds && now > prev.t
+      ? ((cmds - prev.cmds) * 1000) / (now - prev.t)
+      : Number(st.instantaneous_ops_per_sec) || 0;
+    app.pulse.push({ t: now, ops, cmds });
     if (app.pulse.length > PULSE_KEEP) app.pulse.shift();
     const ms = performance.now() - t0;
     const engine = app.server.nildb_engine ? ` · ${app.server.nildb_engine}` : '';
@@ -364,7 +372,7 @@ function staticItems() {
   );
   for (let i = 0; i < 16; i++) {
     const ks = app.keyspace[`db${i}`];
-    out.push({ group: 'Databases', title: `Use database ${i}`, sub: ks ? `${fmtInt(ks.keys)} keys` : 'empty', icon: 'db', hidden: true, run: () => app.setDB(i) });
+    out.push({ group: 'Databases', title: `Use database ${i}`, sub: ks ? plural(ks.keys, 'key') : 'empty', icon: 'db', hidden: true, run: () => app.setDB(i) });
   }
   return out;
 }

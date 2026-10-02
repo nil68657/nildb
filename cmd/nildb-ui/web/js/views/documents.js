@@ -4,7 +4,7 @@
 
 import {
   h, clear, api, text, num, items, field, isErr, toJS, fmtInt, fmtBytes, iconButton, button,
-  ejsonLabel, ejsonEdit, ejsonKind, parseJSONArg, copyText, ReplyError,
+  ejsonLabel, ejsonEdit, ejsonKind, parseJSONArg, copyText, plural, ReplyError,
 } from '../lib.js';
 import {
   toast, toastError, confirmDialog, formDialog, seg, spinner, emptyState, jsonTree, planView, table, scalarEl,
@@ -20,7 +20,7 @@ function cursorOf(reply, batchName) {
 
 function cellFor(v) {
   const kind = ejsonKind(v);
-  if (kind === 'object' || kind === 'array') return h('span', { class: 'faint mono' }, ejsonLabel(v));
+  if (kind === 'object' || kind === 'array') return h('span', { class: 'faint mono clip', title: ejsonLabel(v) }, ejsonLabel(v));
   const node = kind === 'string' ? h('span', null, v) : scalarEl(v, kind);
   node.classList.add('clip');
   node.title = ejsonLabel(v);
@@ -39,7 +39,7 @@ export function create(app) {
   const right = h('div', { class: 'pane' });
   const el = h('section', { class: 'view', 'aria-label': 'Documents' },
     h('div', { class: 'view-head' }, h('h1', null, 'Documents'), h('span', { class: 'sub' }, 'DOC.* collections, queried with MongoDB filters in Extended JSON')),
-    h('div', { class: 'split' }, left, right));
+    h('div', { class: 'split docs' }, left, right));
 
   let colls = [];
   let ns = '';
@@ -168,7 +168,7 @@ export function create(app) {
       try {
         const s = toJS(await api.ok(['DOC.STATS', name]));
         clear(statsEl,
-          h('span', null, `${fmtInt(s.count)} documents`), h('span', { title: 'DOC.STATS counts SST files, not data still in memtables' }, `${fmtBytes(s.size)} in SST files`),
+          h('span', null, plural(s.count, 'document')), h('span', { title: 'DOC.STATS counts SST files, not data still in memtables' }, `${fmtBytes(s.size)} in SST files`),
           h('span', null, `${fmtInt(s.nindexes)} ${s.nindexes === 1 ? 'index' : 'indexes'}`));
       } catch (e) {
         clear(statsEl, h('span', { class: 'r-err' }, e.message));

@@ -4,17 +4,25 @@
 
 import {
   h, clear, api, text, items, isErr, toJS, parseInfo, parseKV, fmtInt, fmtBytes, fmtDuration,
-  fmtDateTime, fmtNum, iconButton, button,
+  fmtDateTime, fmtNum, plural, iconButton, button,
 } from '../lib.js';
 import { Sparkline, table, kv, toast, toastError, confirmDialog, spinner } from '../ui.js';
 
 const REFRESH_MS = 5000;
 
 function tile(label) {
-  const value = h('div', { class: 'stat-value' }, '—');
+  const value = h('div', { class: 'stat-value' }, '–');
   const sub = h('div', { class: 'stat-sub' }, '');
   const el = h('div', { class: 'stat' }, h('div', { class: 'stat-label' }, label), value, sub);
-  return { el, set(v, s = '') { value.textContent = v; sub.textContent = s; } };
+  return {
+    el,
+    set(v, s = '') {
+      value.textContent = v;
+      value.title = v;
+      sub.textContent = s;
+      sub.title = s;
+    },
+  };
 }
 
 function card(title, ...extra) {
@@ -29,7 +37,7 @@ function usageBar(used, cap) {
   fill.style.width = `${pct}%`;
   return h('div', { class: 'stack' },
     h('div', { class: `bar${pct > 90 ? ' warn' : ''}`, role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(pct) }, fill),
-    h('span', { class: 'faint tnum' }, `${fmtBytes(used)} of ${fmtBytes(cap)} (${pct.toFixed(0)}%)`));
+    h('span', { class: 'faint tnum' }, `${fmtBytes(used)} of ${fmtBytes(cap)} (${pct > 0 && pct < 1 ? '<1' : pct.toFixed(0)}%)`));
 }
 
 function levels(files) {
@@ -72,7 +80,6 @@ export function create(app) {
     disk: tile('On disk'),
     up: tile('Uptime'),
     engine: tile('Engine'),
-    errs: tile('Error replies'),
   };
   const spark = new Sparkline('Operations per second, last five minutes');
   t.ops.el.append(spark.el);
@@ -108,13 +115,18 @@ export function create(app) {
   let running = false;
   let offset = 0; // server clock minus browser clock, ms
   let leases = [];
+  let errors = null;
 
-  app.on('pulse', (p) => {
+  function paintOps(p = app.pulse) {
     const ops = p.map((s) => s.ops);
     spark.set(ops, 150);
     const last = p[p.length - 1];
-    const peak = Math.max(0, ...ops);
-    t.ops.set(fmtInt(last?.ops ?? 0), `peak ${fmtInt(peak)} in 5 min · ${fmtInt(last?.cmds ?? 0)} commands since start`);
+    const errs = errors == null ? '' : ` · ${fmtInt(errors)} error ${errors === 1 ? 'reply' : 'replies'}`;
+    t.ops.set(fmtNum(last?.ops ?? 0, 1), `peak ${fmtNum(Math.max(0, ...ops), 1)} in 5 min${errs}`);
+  }
+
+  app.on('pulse', (p) => {
+    paintOps(p);
     if (visible) renderLeases();
   });
 
@@ -189,17 +201,19 @@ export function create(app) {
     const keys = ks.reduce((a, x) => a + Number(x.keys || 0), 0);
     const expires = ks.reduce((a, x) => a + Number(x.expires || 0), 0);
     const mine = clients.filter((c) => (c.name || '').startsWith('nildb-ui')).length;
-    t.clients.set(fmtInt((inf.clients || {}).connected_clients), `${mine} from this console · ${fmtInt(st.total_connections_received)} since start`);
-    t.keys.set(fmtInt(keys), `${fmtInt(expires)} with a TTL · ${ks.length} ${ks.length === 1 ? 'database' : 'databases'}`);
+    t.clients.set(fmtInt((inf.clients || {}).connected_clients), `${mine} from this console`);
+    t.keys.set(fmtInt(keys), `${fmtInt(expires)} with a TTL`);
     t.mem.set(fmtBytes(mem.used_memory), `Go heap · RSS ${fmtBytes(mem.used_memory_rss)}`);
     const cfNum = (i, k) => Number(cfInfo[i]?.[k] || 0);
     const sst = cfs.reduce((a, _, i) => a + cfNum(i, 'rocksdb.total-sst-files-size'), 0);
     const memtables = Number(rdb.cur_size_all_mem_tables || 0);
-    t.disk.set(fmtBytes(sst), `SST files · ${fmtBytes(memtables)} in memtables`);
+    t.disk.set(fmtBytes(sst), `${fmtBytes(memtables)} in memtables`);
     const up = Number(srv.uptime_in_seconds || 0);
-    t.up.set(fmtDuration(up * 1000), `since ${fmtDateTime(Date.now() + offset - up * 1000)}`);
-    t.engine.set(`${engine} ${engineVer}`, `${srv.nildb_go_version || ''} · ${srv.os || ''}`);
-    t.errs.set(fmtInt(st.total_error_replies), `net in ${fmtBytes(st.total_net_input_bytes)} · out ${fmtBytes(st.total_net_output_bytes)}`);
+    const since = Date.now() + offset - up * 1000;
+    t.up.set(fmtDuration(up * 1000), `since ${up < 86400 ? new Date(since).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit' }) : fmtDateTime(since)}`);
+    t.engine.set(engine, `${engineVer} · ${srv.nildb_go_version || ''}`);
+    errors = Number(st.total_error_replies || 0);
+    paintOps();
 
     clear(cCF.body, h('div', { class: 'table-wrap' }, table(
       [{ label: 'Column family' }, { label: 'Keys (estimate)', num: true }, { label: 'SST files', num: true }, { label: 'Live data', num: true },
@@ -220,18 +234,18 @@ export function create(app) {
       ['Pending compaction', fmtBytes(rdb.estimate_pending_compaction_bytes)],
       ['Running', `${fmtInt(rdb.num_running_compactions)} compactions, ${fmtInt(rdb.num_running_flushes)} flushes`],
       ['Latest sequence', fmtInt(rdb.latest_sequence_number ?? rocks.latest_seq)],
-      ['Snapshots', `${fmtInt(rdb.num_snapshots)} RocksDB, ${fmtInt(rdb.nildb_leases)} leases of ${fmtInt(rdb.nildb_max_snapshots)}`],
+      ['Snapshots', `${plural(rdb.num_snapshots, 'RocksDB snapshot')}, ${fmtInt(rdb.nildb_leases)} of ${fmtInt(rdb.nildb_max_snapshots)} leases`],
       ['Oldest snapshot', Number(rdb.oldest_snapshot_time) ? fmtDateTime(Number(rdb.oldest_snapshot_time) * 1000) : 'none'],
       ['Rate limiter shim', rdb.nildb_rate_limiter_priority_shim],
       ['Statistics', rdb.nildb_statistics === 'yes' ? 'on (ROCKS.STATS)' : 'off, start with --rocks-stats'],
     ]));
 
     clear(cKeyspace.body, table(
-      [{ label: 'Database' }, { label: 'Keys', num: true }, { label: 'With TTL', num: true }, { label: 'Average TTL', num: true }, { label: '' }],
+      [{ label: 'Database' }, { label: 'Keys', num: true }, { label: 'With TTL', num: true }, { label: 'Average TTL', num: true }, { label: '', cls: 'actions' }],
       ks.map((x) => {
         const n = Number(x.db.slice(2));
         return [
-          h('span', { class: 'mono' }, x.db), fmtInt(x.keys), fmtInt(x.expires), Number(x.avg_ttl) ? fmtDuration(x.avg_ttl) : '—',
+          h('span', { class: 'mono' }, x.db), fmtInt(x.keys), fmtInt(x.expires), Number(x.avg_ttl) ? fmtDuration(x.avg_ttl) : 'none',
           button('Browse', () => { app.setDB(n); app.go('keys'); }, { cls: 'sm ghost' }),
         ];
       }),
@@ -253,9 +267,9 @@ export function create(app) {
 
     clear(cAnalytics.body, kv([
       ['Queries', `${fmtInt(an.analytics_queries)} run, ${fmtInt(an.analytics_running)} running, ${fmtInt(an.analytics_queued)} queued`],
-      ['Scanned', `${fmtInt(an.analytics_rows_scanned)} rows, ${fmtBytes(an.analytics_bytes_scanned)}`],
+      ['Scanned', `${plural(an.analytics_rows_scanned, 'row')}, ${fmtBytes(an.analytics_bytes_scanned)}`],
       ['Throttled', `${fmtDuration(an.analytics_throttle_sleep_ms)} asleep, ${fmtInt(an.analytics_rejections)} refused`],
-      ['Open', `${fmtInt(an.analytics_open_leases)} leases, ${fmtInt(an.analytics_open_cursors)} cursors`],
+      ['Open', `${plural(an.analytics_open_leases, 'lease')}, ${plural(an.analytics_open_cursors, 'cursor')}`],
       ['Concurrency limit', an.analytics_max_concurrent],
     ]));
 

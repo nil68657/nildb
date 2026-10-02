@@ -403,7 +403,14 @@ main:focus { outline: none; }
 
 .grid { display: grid; gap: 16px; }
 .grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
-.grid.stats { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.grid.stats { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.an-grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); grid-template-areas: "query" "result" "side"; }
+.an-query { grid-area: query; }
+.an-result { grid-area: result; }
+.an-side { grid-area: side; }
+@media (min-width: 1280px) {
+  .an-grid { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); grid-template-areas: "query side" "result result"; }
+}
 
 .stat {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
@@ -435,8 +442,14 @@ main:focus { outline: none; }
 .table tr.selected td { background: var(--accent-bg); }
 .table td.mono { font-family: var(--mono); font-size: 12.5px; }
 .table .clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.table span.clip { display: inline-block; max-width: 260px; vertical-align: top; }
 .table.clickable tbody tr { cursor: pointer; }
 .table .actions { width: 1%; white-space: nowrap; text-align: right; }
+.table .actions .btn, .table .actions .icon-btn { margin-block: -3px; }
+.table.fixed { table-layout: fixed; }
+.table.fixed .actions { width: 76px; }
+.table.fixed th.num:first-child { width: 72px; }
+.table.fixed .clip { max-width: none; }
 .table .actions .icon-btn { opacity: 0.55; }
 .table tr:hover .actions .icon-btn, .table .actions .icon-btn:focus-visible { opacity: 1; }
 
@@ -466,6 +479,8 @@ main:focus { outline: none; }
 /* ---------- split panes and lists ---------- */
 
 .split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 400px) minmax(0, 1fr); border-top: 1px solid var(--line); }
+.split.docs { grid-template-columns: minmax(170px, 230px) minmax(0, 1fr); }
+.vrow .badge { width: 52px; }
 .pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .pane + .pane { border-left: 1px solid var(--line); }
 .pane-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
@@ -636,7 +651,7 @@ main:focus { outline: none; }
 }
 .map-coords { position: absolute; left: 12px; bottom: 10px; font: 11.5px var(--mono); color: var(--text-3); background: color-mix(in oklab, var(--panel) 80%, transparent); padding: 3px 7px; border-radius: 5px; }
 .map-attr { position: absolute; right: 12px; bottom: 10px; font-size: 11px; color: var(--text-3); }
-.geo-side { width: 360px; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.geo-side { width: 340px; flex: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
 .geo-main { flex: 1; min-height: 0; display: flex; border-top: 1px solid var(--line); }
 
 /* ---------- charts ---------- */
@@ -716,6 +731,7 @@ dialog.palette[open] { animation: pop-in 120ms var(--ease); }
 
 @media (max-width: 1100px) {
   .palette-btn { width: 220px; }
+  .geo-side { width: 290px; }
   .query { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 76px 76px; }
   .query .q-filter { grid-column: 1 / -1; }
 }
@@ -729,10 +745,14 @@ dialog.palette[open] { animation: pop-in 120ms var(--ease); }
   .palette-btn { width: 40px; padding: 0; justify-content: center; }
   .palette-btn-text, .palette-btn kbd { display: none; }
   .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(220px, 40%) minmax(0, 1fr); }
+  .split.docs { grid-template-columns: minmax(0, 1fr); }
   .pane + .pane { border-left: 0; border-top: 1px solid var(--line); }
   .geo-side { width: 300px; }
-  .doc-drawer { position: absolute; right: 0; top: 0; bottom: 0; width: min(520px, 100%); z-index: 3; box-shadow: var(--shadow-pop); }
+}
+
+@media (max-width: 1200px) {
   .docs-main { position: relative; }
+  .doc-drawer { position: absolute; right: 0; top: 0; bottom: 0; width: min(460px, 100%); z-index: 3; box-shadow: var(--shadow-pop); }
 }
 
 @media (max-width: 640px) {
@@ -746,7 +766,7 @@ dialog.palette[open] { animation: pop-in 120ms var(--ease); }
   .geo-side { width: auto; border-left: 0; border-top: 1px solid var(--line); max-height: 45%; }
   .view-head, .view-body { padding-left: 12px; padding-right: 12px; }
   .grid.cols-2 { grid-template-columns: minmax(0, 1fr); }
-  .stat.wide { grid-column: auto; }
+  .grid.stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .query { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
 

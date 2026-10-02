@@ -57,7 +57,7 @@ function hexdump(bytes, max = 64 << 10) {
 
 export function create(app) {
   const ro = () => app.readonly;
-  const matchIn = searchInput({ placeholder: 'MATCH pattern, such as user:*', 'aria-label': 'Key pattern (SCAN MATCH)', class: 'input mono' });
+  const matchIn = searchInput({ placeholder: 'MATCH user:*', title: 'SCAN MATCH pattern: * ? [abc] and \\ work as in Redis', 'aria-label': 'Key pattern (SCAN MATCH)', class: 'input mono' });
   const matchInput = matchIn.querySelector('input');
   const typeSel = h('select', { class: 'select', 'aria-label': 'Key type (SCAN TYPE)' },
     h('option', { value: '' }, 'All types'), TYPES.map((t) => h('option', { value: t }, t)));
@@ -116,7 +116,7 @@ export function create(app) {
     else if (done) parts.push(`${fmtInt(list.items.length)} ${filtered ? 'matching ' : ''}keys`);
     else parts.push(`${fmtInt(list.items.length)} loaded${total && !filtered ? ` of ${fmtInt(total)}` : ''}`);
     if (loading) parts.push(spinner('Scanning'));
-    parts.push(h('span', { class: 'grow' }), `${fmtInt(calls)} SCAN calls · ${Math.round(scanMs)} ms`);
+    parts.push(h('span', { class: 'grow' }), `${fmtInt(calls)} SCAN ${calls === 1 ? 'call' : 'calls'} · ${Math.round(scanMs)} ms`);
     clear(foot, parts);
     sub.textContent = `db ${app.db}${filtered ? ` · MATCH ${matchInput.value.trim() || '*'}${typeSel.value ? ` TYPE ${typeSel.value}` : ''}` : ''}`;
   }
@@ -293,7 +293,7 @@ export function create(app) {
           toastError(e, 'Save failed');
         }
       }, { cls: 'sm primary' });
-      const fmtBtn = button('Format JSON', () => {
+      const fmtBtn = button('Format', () => {
         try { area.value = JSON.stringify(JSON.parse(area.value), null, 2); } catch (e) { toastError(e, 'Not JSON'); }
       }, { cls: 'sm' });
       const show = (m) => {
@@ -322,7 +322,7 @@ export function create(app) {
       const { k, body } = ctx;
       let cursorH = '0';
       let rows = [];
-      const matchBox = searchInput({ placeholder: 'Filter fields (HSCAN MATCH)', 'aria-label': 'Field pattern', class: 'input mono' });
+      const matchBox = searchInput({ placeholder: 'Filter fields', title: 'HSCAN MATCH pattern', 'aria-label': 'Field pattern', class: 'input mono' });
       const mIn = matchBox.querySelector('input');
       const holder = h('div', { class: 'table-wrap' });
       const more = button('Load more', () => load().catch((e) => toastError(e)), { cls: 'sm' });
@@ -340,7 +340,7 @@ export function create(app) {
               iconButton('edit', 'Edit value', () => editField([f, v]), 'sm'),
               iconButton('trash', 'Delete field', () => delField(f), 'sm')),
           ]),
-          { empty: mIn.value ? 'No field matches' : 'This hash has no fields' }));
+          { empty: mIn.value ? 'No field matches' : 'This hash has no fields', fixed: true }));
         more.hidden = cursorH === '0';
       };
       async function load(reset = false) {
@@ -409,7 +409,7 @@ export function create(app) {
               iconButton('edit', `Edit item ${i}`, () => editItem(i, v), 'sm'),
               iconButton('trash', `Remove item ${i}`, () => removeItem(i, v), 'sm')),
           ]),
-          { empty: 'This list is empty' }));
+          { empty: 'This list is empty', fixed: true }));
         more.hidden = rows.length >= total;
         range.textContent = total ? `items 0 to ${fmtInt(rows.length - 1)} of ${fmtInt(total)}` : '';
       };
@@ -464,7 +464,7 @@ export function create(app) {
       const { k, body } = ctx;
       let cursorS = '0';
       let rows = [];
-      const matchBox = searchInput({ placeholder: 'Filter members (SSCAN MATCH)', 'aria-label': 'Member pattern', class: 'input mono' });
+      const matchBox = searchInput({ placeholder: 'Filter members', title: 'SSCAN MATCH pattern', 'aria-label': 'Member pattern', class: 'input mono' });
       const mIn = matchBox.querySelector('input');
       const holder = h('div', { class: 'table-wrap' });
       const more = button('Load more', () => load().catch((e) => toastError(e)), { cls: 'sm' });
@@ -479,7 +479,7 @@ export function create(app) {
             h('div', { class: 'clip mono', title: shown(m).slice(0, 2000) }, shown(m).slice(0, 400)),
             ro() ? '' : iconButton('trash', 'Remove member', () => remove(m), 'sm'),
           ]),
-          { empty: mIn.value ? 'No member matches' : 'This set is empty' }));
+          { empty: mIn.value ? 'No member matches' : 'This set is empty', fixed: true }));
         more.hidden = cursorS === '0';
       };
       async function load(reset = false) {
@@ -524,7 +524,7 @@ export function create(app) {
       let total = 0;
       let rev = false;
       let cursorZ = '0';
-      const matchBox = searchInput({ placeholder: 'Filter members (ZSCAN MATCH)', 'aria-label': 'Member pattern', class: 'input mono' });
+      const matchBox = searchInput({ placeholder: 'Filter members', title: 'ZSCAN MATCH pattern', 'aria-label': 'Member pattern', class: 'input mono' });
       const mIn = matchBox.querySelector('input');
       const holder = h('div', { class: 'table-wrap' });
       const more = button('Load more', () => load().catch((e) => toastError(e)), { cls: 'sm' });
@@ -548,7 +548,7 @@ export function create(app) {
               iconButton('edit', 'Change score', () => edit([m, s]), 'sm'),
               iconButton('trash', 'Remove member', () => remove(m), 'sm')),
           ]),
-          { empty: filtering() ? 'No member matches' : 'This sorted set is empty' }));
+          { empty: filtering() ? 'No member matches' : 'This sorted set is empty', fixed: true }));
         more.hidden = filtering() ? cursorZ === '0' : rows.length >= total;
       };
       async function load(reset = false) {
