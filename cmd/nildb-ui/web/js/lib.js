@@ -101,7 +101,7 @@ export function badge(type) {
 const nf = new Intl.NumberFormat('en-US');
 
 export function fmtInt(n) {
-  if (n == null || n === '') return '—';
+  if (n == null || n === '') return '–';
   if (typeof n === 'string' && !/^-?\d+$/.test(n)) return n;
   const x = typeof n === 'string' && n.length > 15 ? BigInt(n) : Number(n);
   return nf.format(x);
@@ -116,7 +116,7 @@ export function fmtNum(n, digits = 2) {
 
 export function fmtBytes(n) {
   let x = Number(n);
-  if (!Number.isFinite(x)) return '—';
+  if (!Number.isFinite(x)) return '–';
   if (x < 1024) return `${x} B`;
   const units = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
   let i = -1;
@@ -126,7 +126,7 @@ export function fmtBytes(n) {
 
 export function fmtDuration(ms) {
   const x = Number(ms);
-  if (!Number.isFinite(x)) return '—';
+  if (!Number.isFinite(x)) return '–';
   if (x < 1000) return `${Math.max(0, Math.round(x))} ms`;
   let s = Math.floor(x / 1000);
   const d = Math.floor(s / 86400); s %= 86400;
@@ -407,6 +407,8 @@ export function reprBulk(v) {
 export function quoteArg(a) {
   const s = typeof a === 'string' ? a : a && a.b64 ? escapeBytes(b64Bytes(a.b64)) : String(a);
   if (s !== '' && /^[^\s"'\\]+$/.test(s) && !/[\x00-\x1f\x7f]/.test(s)) return s;
+  // Single quotes keep JSON readable; inside them only \' is an escape.
+  if (s.includes('"') && !s.includes("'") && !/[\x00-\x1f\x7f]/.test(s)) return `'${s}'`;
   return '"' + escapeText(s) + '"';
 }
 
